@@ -86,13 +86,16 @@ Item {
       }
     }
 
-    PanelSeparator { Layout.fillWidth: true; foreground: view.foreground; visible: view.deferred.length > 0 }
+    PanelSeparator { Layout.fillWidth: true; foreground: view.foreground }
 
     // The honest part of a bullet journal: what you have rewritten five times
     // and still not done.
+    //
+    // The header stays even when the list is empty. Hiding it left the empty
+    // message floating under the completion rails with nothing to say what it
+    // was about.
     PanelSectionHeader {
       Layout.fillWidth: true
-      visible: view.deferred.length > 0
       text: "MOST DEFERRED"
       foreground: view.foreground
       fontFamily: view.fontFamily

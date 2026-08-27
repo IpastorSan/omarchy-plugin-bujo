@@ -32,7 +32,7 @@ check-plugin:
 # files it will never load are just reload noise.
 install-dev:
     rsync -a --delete \
-        --exclude '.git/' --exclude 'tests/' --exclude '.github/' \
+        --exclude '.git/' --exclude 'tests/' --exclude '.github/' --exclude 'docs/' \
         ./ {{dest}}/
     omarchy-shell shell rescanPlugins
 

@@ -3,7 +3,7 @@
 **A bullet journal in the Omarchy bar. Tasks belong to a day, and what you don't
 finish gets migrated forward — deliberately, by you.**
 
-![The day view with a backlog banner, beside the month calendar](preview.png)
+![Adding a task, ticking it off, pulling in the backlog, then the calendar and the summary](docs/walkthrough.gif)
 
 Every other task widget is a flat list or a board: things are either done or
 they aren't, and nothing records that you have now rewritten *call the
@@ -33,9 +33,13 @@ No dependencies beyond Omarchy itself. Nothing leaves your machine.
 **The pill** shows today at a glance — `󰄱 2/5` — and goes to a checked box when
 the day is clear. It dims on a day you have not written anything on.
 
+![The bar pill showing two of four done](docs/bar-pill.png)
+
 **The day view** is the list: click a box to strike it through, type in the
 field to add. `‹` and `›` walk through dates; the completion rail and `2/5 ·
 40%` say how the day is going.
+
+![The day view](docs/day.png)
 
 **Migration** is the point. The button names where things land, always —
 `Migrate 3 open → tomorrow` on today, `→ today` on a day in the past. And when
@@ -52,22 +56,20 @@ as `»4` in red — the journal telling you to either do it or drop it. The
 **summary view** (`s`) ranks exactly those: your most-deferred work, alongside
 7- and 30-day completion and a streak of days you finished clean.
 
+![The summary view](docs/summary.png)
+
 **The calendar** (`m`) is a month of dots: hollow for a day you wrote on and
 finished nothing, filling as the ratio climbs, solid when you cleared it. Click
 any day to open it.
+
+![The month calendar with per-day completion dots](docs/calendar.png)
 
 ### What migrating does *not* do
 
 It does not erase the entry from the day it was written on. That day keeps the
 line, struck through with `›` and pointing at where the work went:
 
-```
-Tue 25 Aug 2026                     2/4 · 50%
-  ☑ Draft the plan
-  ☑ Read the API
-  › Call the bank                     → 27 Aug
-  › Renew the domain                  → 27 Aug
-```
+![A past day, still reading 2/4, with two migrated entries pointing forward](docs/past-day.png)
 
 This is deliberate, and it is the reason the percentages mean anything. Delete
 the open tasks instead and every day you ever migrated from reads 100%, because

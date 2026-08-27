@@ -288,7 +288,13 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
 
-    function today(): string { root.goToday(); return root.todayKey }
+    // Opens, like view() and day() do. "Take me to today" that leaves the panel
+    // shut is not what any caller means, least of all a keybinding.
+    function today(): string {
+      root.open()
+      root.goToday()
+      return root.todayKey
+    }
 
     // Jump straight to a screen or a date, so the panel is scriptable from a
     // keybinding: `omarchy-shell bujo view month`, `bujo day 2026-08-25`.

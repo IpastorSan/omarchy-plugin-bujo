@@ -265,6 +265,39 @@ test("moveTask reorders and refuses to run off either end", () => {
   assert.equal(M.moveTask(s, "2026-08-27", "nope", 1), s)
 })
 
+test("reordering steps over a deletion marker instead of stalling on it", () => {
+  // The list the user sees has the deleted entry filtered out, so J on the
+  // first row must swap it with the next VISIBLE row. Counting positions in the
+  // raw list makes it swap with the invisible marker instead, and the visible
+  // order does not change at all.
+  let s = seed({ "2026-08-27": ["a", "b", "c"] })
+  const [a, b, c] = M.tasksFor(s, "2026-08-27")
+  s = M.deleteTask(s, "2026-08-27", b.id, T2)
+  assert.deepEqual(M.tasksFor(s, "2026-08-27").map((t) => t.text), ["a", "c"])
+
+  s = M.moveTask(s, "2026-08-27", a.id, 1)
+  assert.deepEqual(M.tasksFor(s, "2026-08-27").map((t) => t.text), ["c", "a"])
+
+  s = M.moveTask(s, "2026-08-27", a.id, -1)
+  assert.deepEqual(M.tasksFor(s, "2026-08-27").map((t) => t.text), ["a", "c"])
+})
+
+test("reordering refuses to run off either end of the VISIBLE list", () => {
+  let s = seed({ "2026-08-27": ["a", "b", "c"] })
+  const [a, b, c] = M.tasksFor(s, "2026-08-27")
+  s = M.deleteTask(s, "2026-08-27", c.id, T2)
+  // b is now visibly last, even though a marker sits after it.
+  assert.equal(M.moveTask(s, "2026-08-27", b.id, 1), s)
+  assert.equal(M.moveTask(s, "2026-08-27", a.id, -1), s)
+})
+
+test("a deleted task cannot be reordered", () => {
+  let s = seed({ "2026-08-27": ["a", "b"] })
+  const [a] = M.tasksFor(s, "2026-08-27")
+  s = M.deleteTask(s, "2026-08-27", a.id, T2)
+  assert.equal(M.moveTask(s, "2026-08-27", a.id, 1), s)
+})
+
 test("edits and toggles against an unknown id return the same store", () => {
   const s = seed({ "2026-08-27": ["a"] })
   assert.equal(M.toggleTask(s, "2026-08-27", "nope", T2), s)

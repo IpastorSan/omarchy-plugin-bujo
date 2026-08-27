@@ -71,11 +71,32 @@ Panel {
     overridePath: root.setting("statePath", "")
   }
 
+  // Reading the device id is a subprocess, so for the first moments of a
+  // session there is no device to stamp an id with. Falling back to a constant
+  // would make every machine's earliest tasks share a tag, which is exactly the
+  // collision the tag exists to prevent — and the first task of a session is
+  // precisely when someone types into a freshly opened panel. Hold them.
+  property var pendingAdds: []
+
+  Connections {
+    target: store
+    function onDeviceIdChanged() {
+      if (!store.deviceId || !root.pendingAdds.length) return
+      var queued = root.pendingAdds
+      root.pendingAdds = []
+      var next = root.journal
+      for (var i = 0; i < queued.length; i++) {
+        next = Model.addTask(next, queued[i].key, queued[i].text, root.nowIso(), store.deviceId)
+      }
+      store.commit(next)
+    }
+  }
+
   readonly property var journal: store.journal
   readonly property var todayStats: Model.dayStats(root.journal, root.todayKey)
-  readonly property var viewedStats: Model.dayStats(root.journal, root.viewedKey)
 
   function addTask(text) {
+    if (!store.deviceId) { pendingAdds.push({ key: root.viewedKey, text: text }); return }
     store.commit(Model.addTask(root.journal, root.viewedKey, text, root.nowIso(), store.deviceId))
   }
   function toggleTask(id) {
@@ -153,19 +174,26 @@ Panel {
   // Rolls the pill over at midnight without a restart. Re-armed on every tick
   // rather than left repeating, because the interval to the next midnight is
   // different every time and DST makes it not exactly 24h.
+  function msUntilMidnight() {
+    var now = new Date()
+    var next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5)
+    return Math.max(1000, next - now)
+  }
+
   Timer {
     id: midnight
     running: true
     repeat: false
-    interval: {
-      var now = new Date()
-      var next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5)
-      return Math.max(1000, next - now)
-    }
+    // Assigned, not bound. A binding over `new Date()` depends on nothing
+    // reactive, so it evaluates once and restart() then reuses the very first
+    // value forever: a shell started at 10:00 keeps firing 14 hours apart, and
+    // the day rolls over hours late from the second night onward.
+    interval: root.msUntilMidnight()
     onTriggered: {
       var wasToday = root.viewedKey === root.todayKey
       root.todayKey = Model.keyForDate(new Date())
       if (wasToday) root.goToday()
+      midnight.interval = root.msUntilMidnight()
       midnight.restart()
     }
   }
@@ -288,6 +316,7 @@ Panel {
     function add(text: string): string {
       var clean = String(text || "").trim()
       if (!clean) return "empty"
+      if (!store.deviceId) { pendingAdds.push({ key: root.todayKey, text: clean }); return "queued" }
       store.commit(Model.addTask(root.journal, root.todayKey, clean, root.nowIso(), store.deviceId))
       return "ok"
     }

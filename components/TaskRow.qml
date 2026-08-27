@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import qs.Ui
 import qs.Commons
+import "../Model.js" as Model
 
 // One line of the journal.
 //
@@ -88,7 +89,9 @@ CursorSurface {
     // Where a migrated entry went.
     Text {
       visible: row.migrated
-      text: "→ " + Qt.formatDate(new Date(row.task.migratedTo), "d MMM")
+      // Model.parseKey, not new Date(key): the latter reads "2026-08-27" as UTC
+      // midnight, which formats as the 26th for anyone west of Greenwich.
+      text: "→ " + Qt.formatDate(Model.parseKey(row.task.migratedTo), "d MMM")
       color: row.foreground
       opacity: 0.45
       font.family: row.fontFamily

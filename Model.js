@@ -462,17 +462,39 @@ function deleteTask(store, key, id, nowIso) {
   return changed ? out : store
 }
 
+// Reorder within the list as the user sees it.
+//
+// Deliberately not "move one place in the stored array": deletion markers live
+// in that array and are invisible, so a raw ±1 can swap a task with a marker
+// and leave the visible order completely unchanged. Positions are resolved
+// among the visible entries, then applied to the stored one.
 function moveTask(store, key, id, delta) {
-  var out = cloneStore(store)
-  var list = (out.days[key] || []).slice()
+  var step = Number(delta || 0)
+  if (!step) return store
+
+  var list = rawTasksFor(store, key)
+  var visible = []
   var from = -1
-  for (var i = 0; i < list.length; i++) if (list[i].id === id) { from = i; break }
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].deleted) continue
+    if (list[i].id === id) from = visible.length
+    visible.push(i)
+  }
   if (from === -1) return store
-  var to = from + Number(delta || 0)
-  if (to < 0 || to >= list.length) return store
-  var moved = list.splice(from, 1)[0]
-  list.splice(to, 0, moved)
-  out.days[key] = list
+
+  var to = from + step
+  if (to < 0 || to >= visible.length) return store
+
+  var out = cloneStore(store)
+  var next = out.days[key].slice()
+  // Swap the two stored slots the visible neighbours occupy. A swap rather than
+  // a splice, so every marker keeps its position and the operation is its own
+  // inverse.
+  var a = visible[from], b = visible[to]
+  var held = next[a]
+  next[a] = next[b]
+  next[b] = held
+  out.days[key] = next
   return out
 }
 

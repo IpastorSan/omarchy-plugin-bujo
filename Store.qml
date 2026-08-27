@@ -116,6 +116,17 @@ Item {
       waitForEnd: true
       onStreamFinished: store.deviceId = String(text).trim()
     }
+    onExited: {
+      // If the probe produced nothing — no /dev/urandom, a read-only state
+      // directory — fall back rather than leaving deviceId empty. Anything
+      // waiting on it would otherwise wait forever, and a queued task that
+      // never lands is worse than an id derived from the clock. Distinct per
+      // install, which is all the merge actually needs.
+      if (!store.deviceId) {
+        store.lastError = "Could not read " + store.devicePath
+        store.deviceId = "t" + Math.floor(Date.now()).toString(36).slice(-7)
+      }
+    }
   }
 
   Process {
@@ -154,20 +165,18 @@ Item {
 
       var incoming = Model.normalizeStore(text)
 
-      // First read of the session: there is nothing of ours to preserve yet, so
-      // adopt the file whole.
-      if (!store.ready) {
-        store.journal = incoming
-        store.ready = true
-        store.changed()
-        return
-      }
-
-      // Somebody else wrote this — another machine through a sync folder, or a
-      // text editor. Ours is not automatically right and neither is theirs, so
-      // combine them.
+      // Merge unconditionally, including on the very first read of the session.
+      //
+      // Adopting the file wholesale the first time looked harmless — there is
+      // usually nothing of ours yet — but "usually" is doing real work in that
+      // sentence. An IPC add can land before the file has finished loading, and
+      // adopting would have thrown it away. Merging an empty journal against
+      // the file yields the file, so the ordinary case is unchanged, and it
+      // also means a file that arrives already holding a duplicated lineage
+      // gets collapsed on load rather than only on the next sync.
       var merged = Model.mergeStores(store.journal, incoming)
       store.journal = merged
+      store.ready = true
       store.changed()
 
       // If the merge produced anything the file did not already contain, write

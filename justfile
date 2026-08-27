@@ -31,7 +31,10 @@ check-plugin:
 # tests/ and .github/ are excluded: the shell watches this tree recursively and
 # files it will never load are just reload noise.
 install-dev:
-    rsync -a --delete \
+    # --delete-excluded, not just --delete: rsync treats excluded paths as
+    # protected, so a docs/ left over from an earlier sync would sit in the
+    # watched plugin tree forever.
+    rsync -a --delete --delete-excluded \
         --exclude '.git/' --exclude 'tests/' --exclude '.github/' --exclude 'docs/' \
         ./ {{dest}}/
     omarchy-shell shell rescanPlugins

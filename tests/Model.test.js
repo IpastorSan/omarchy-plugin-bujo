@@ -142,15 +142,38 @@ test("normalizeStore drops junk days and junk tasks but keeps the good ones", ()
   assert.equal(s.days["2026-08-27"][0].text, "keep")
 })
 
-test("normalizeStore backfills origin and de-duplicates ids", () => {
+test("normalizeStore backfills origin and drops duplicate ids rather than renaming", () => {
   const s = M.normalizeStore({
     version: 1,
     days: { "2026-08-27": [{ id: "dup", text: "one" }, { id: "dup", text: "two" }] },
   })
-  const [a, b] = s.days["2026-08-27"]
-  assert.notEqual(a.id, b.id)
-  assert.equal(a.origin, "2026-08-27")
-  assert.equal(b.origin, "2026-08-27")
+  const list = s.days["2026-08-27"]
+  assert.equal(list.length, 1, "the first occurrence wins")
+  assert.equal(list[0].text, "one")
+  assert.equal(list[0].origin, "2026-08-27")
+})
+
+test("a duplicate id is dropped identically on every device", () => {
+  // Renaming a duplicate mints a new identity, each device invents a different
+  // one, and the merge then writes them back at each other forever. Dropping is
+  // the only resolution both machines can reach independently.
+  const raw = { version: 1, days: { "2026-08-27": [{ id: "dup", text: "one" }, { id: "dup", text: "two" }] } }
+  const a = M.normalizeStore(raw)
+  const b = M.normalizeStore(raw)
+  assert.deepEqual(content(M.mergeStores(a, b)), content(a))
+})
+
+test("an id that appears on two days settles onto one of them", () => {
+  // A hand edit, or a sync tool reviving an older copy. Unioning per day would
+  // place the same id under both, and everything downstream would read that as
+  // two tasks -- which is how one task became six.
+  const onThe25th = M.normalizeStore({ version: 1,
+    days: { "2026-08-25": [{ id: "x", text: "renew the domain", root: "x" }] } })
+  const onThe27th = M.normalizeStore({ version: 1,
+    days: { "2026-08-27": [{ id: "x", text: "renew the domain", root: "x" }] } })
+  const merged = converge(onThe25th, onThe27th)
+  assert.equal(M.tasksFor(merged, "2026-08-25").length, 1, "earliest day wins")
+  assert.equal(M.rawTasksFor(merged, "2026-08-27").length, 0, "and it exists nowhere else")
 })
 
 test("normalizeText collapses a pasted paragraph into one line", () => {
@@ -573,18 +596,72 @@ test("both devices pulling the same backlog forward yields one task, not two", (
   assert.equal(M.rawTasksFor(merged, "2026-08-25")[0].migratedTo, "2026-08-27")
 })
 
-test("migrating to different days on each device settles deterministically", () => {
+test("migrating to different days on each device leaves ONE task, not two", () => {
   let base = M.addTask(M.emptyStore(), "2026-08-25", "renew the domain", T0, "aaaa")
   const toThe26th = M.carryOver(base, "2026-08-25", "2026-08-26", T1)
   const toThe27th = M.carryOver(base, "2026-08-25", "2026-08-27", T2)
   const merged = converge(toThe26th, toThe27th)
-  // The earlier migration decided where the original went...
+
+  // Each device made its own copy before they met, with different ids because
+  // they are on different days. They share a root, so they fold back together.
+  assert.equal(M.tasksFor(merged, "2026-08-26").length, 1, "survivor is on the earliest day")
+  assert.equal(M.tasksFor(merged, "2026-08-27").length, 0, "the sibling is gone")
+  assert.equal(M.rawTasksFor(merged, "2026-08-27")[0].deleted, true,
+    "and gone as a deletion marker, so the collapse propagates")
   assert.equal(M.rawTasksFor(merged, "2026-08-25")[0].migratedTo, "2026-08-26")
-  // ...but each device already made its own copy, and a two-way merge with no
-  // common ancestor cannot know they are the same work. This is the one case
-  // that leaves a duplicate, and it is documented as such.
-  assert.equal(M.tasksFor(merged, "2026-08-26").length, 1)
-  assert.equal(M.tasksFor(merged, "2026-08-27").length, 1)
+})
+
+test("collapsing keeps work done on the copy that loses", () => {
+  let base = M.addTask(M.emptyStore(), "2026-08-25", "renew the domain", T0, "aaaa")
+  let laptop = M.carryOver(base, "2026-08-25", "2026-08-26", T1)
+  let desktop = M.carryOver(base, "2026-08-25", "2026-08-27", T2)
+  // Finished on the desktop, whose copy is the one that will lose.
+  const doomed = M.tasksFor(desktop, "2026-08-27")[0]
+  desktop = M.toggleTask(desktop, "2026-08-27", doomed.id, T2)
+
+  const merged = converge(laptop, desktop)
+  const survivor = M.tasksFor(merged, "2026-08-26")[0]
+  assert.equal(survivor.done, true, "a completion must not be collapsed away")
+  assert.equal(survivor.doneAt, T2)
+})
+
+test("collapsing keeps a rename made on the copy that loses", () => {
+  let base = M.addTask(M.emptyStore(), "2026-08-25", "original", T0, "aaaa")
+  let laptop = M.carryOver(base, "2026-08-25", "2026-08-26", T1)
+  let desktop = M.carryOver(base, "2026-08-25", "2026-08-27", T1)
+  const doomed = M.tasksFor(desktop, "2026-08-27")[0]
+  desktop = M.editTask(desktop, "2026-08-27", doomed.id, "renamed later", T2)
+
+  const survivor = M.tasksFor(converge(laptop, desktop), "2026-08-26")[0]
+  assert.equal(survivor.text, "renamed later")
+})
+
+test("a lineage is followed through repeated migrations", () => {
+  let s = M.addTask(M.emptyStore(), "2026-08-20", "long runner", T0, "aaaa")
+  const root = M.tasksFor(s, "2026-08-20")[0].id
+  s = M.carryOver(s, "2026-08-20", "2026-08-21", T1)
+  s = M.carryOver(s, "2026-08-21", "2026-08-22", T2)
+  const live = M.tasksFor(s, "2026-08-22")[0]
+  assert.equal(live.root, root, "root survives every hop")
+  assert.notEqual(live.id, root, "the copy is still its own entry")
+  assert.equal(live.migrations, 2)
+})
+
+test("a journal written before roots existed gets one from the id", () => {
+  // Migrated copies encode their source in the id, so legacy data backfills
+  // correctly rather than every task becoming its own lineage.
+  const legacy = M.normalizeStore({
+    version: 1,
+    days: { "2026-08-27": [{ id: "abc-1>2026-08-26>2026-08-27", text: "carried" }] },
+  })
+  assert.equal(M.tasksFor(legacy, "2026-08-27")[0].root, "abc-1")
+})
+
+test("collapsing does not disturb two genuinely different tasks", () => {
+  const a = M.addTask(M.emptyStore(), "2026-08-27", "one", T2, "aaaa")
+  const b = M.addTask(M.emptyStore(), "2026-08-27", "two", T2, "bbbb")
+  const merged = converge(a, b)
+  assert.equal(M.tasksFor(merged, "2026-08-27").length, 2)
 })
 
 test("migrations never counts down", () => {

@@ -195,8 +195,18 @@ function normalizeTask(raw, dayKey) {
   var migrations = Number(raw.migrations)
   if (!isFinite(migrations) || migrations < 0) migrations = 0
   var origin = isKey(raw.origin) ? raw.origin : dayKey
+  var id = typeof raw.id === "string" && raw.id ? raw.id : ""
+  // The identity of the WORK, stable across every migration, as opposed to the
+  // id, which identifies one copy of it on one day. Two machines that migrate
+  // the same task to different days produce two copies with different ids but
+  // the same root, which is what lets the merge tell they are one task.
+  //
+  // Backfilled for journals written before this existed: a migrated copy's id
+  // is "<source>>YYYY-MM-DD", so the text before the first ">" is the root.
+  var root = typeof raw.root === "string" && raw.root ? raw.root : id.split(">")[0]
   return {
-    id: typeof raw.id === "string" && raw.id ? raw.id : "",
+    id: id,
+    root: root,
     text: text,
     done: raw.done === true,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "",
@@ -244,8 +254,14 @@ function normalizeStore(raw) {
     for (var i = 0; i < list.length; i++) {
       var task = normalizeTask(list[i], key)
       if (!task) continue
-      // A duplicate id would make toggling ambiguous. Re-stem the later one.
-      if (!task.id || seen[task.id]) task.id = "fix-" + key + "-" + i
+      // A duplicate id makes toggling ambiguous, so only one can survive.
+      //
+      // The first occurrence wins and the rest are DROPPED — never renamed.
+      // Renaming looked kinder, but a renamed task is a new identity, each
+      // device invents a different one, and the merge then treats them as
+      // extra tasks and writes them back at each other. One malformed file
+      // multiplied a single task into six that way.
+      if (!task.id || seen[task.id]) continue
       seen[task.id] = true
       tasks.push(task)
     }
@@ -365,8 +381,10 @@ function addTask(store, key, text, nowIso, deviceId) {
   if (!clean || !isKey(key)) return store
   var out = cloneStore(store)
   var list = (out.days[key] || []).slice()
+  var id = newId(out, nowIso, deviceId)
   list.push({
-    id: newId(out, nowIso, deviceId),
+    id: id,
+    root: id,
     text: clean,
     done: false,
     createdAt: String(nowIso || ""),
@@ -481,6 +499,7 @@ function carryOver(store, fromKey, toKey, nowIso) {
     var moved = {}
     for (var k in task) moved[k] = task[k]
     moved.id = migratedId(out, task.id, toKey)
+    moved.root = task.root || task.id
     moved.migrations = Math.floor(Number(task.migrations) || 0) + 1
     moved.origin = isKey(task.origin) ? task.origin : fromKey
     moved.migratedTo = null
@@ -588,6 +607,11 @@ function mergeTask(local, remote) {
   out.migratedAt = earlierStamp(local.migratedAt, remote.migratedAt)
 
   out.migrations = Math.max(Number(local.migrations) || 0, Number(remote.migrations) || 0)
+  // Identical in practice; the smaller string keeps it deterministic if a
+  // hand-edited file ever disagrees with itself.
+  out.root = (local.root && remote.root)
+    ? (local.root <= remote.root ? local.root : remote.root)
+    : (local.root || remote.root || local.id)
   out.origin = earlierStamp(local.origin, remote.origin) || local.origin
   out.createdAt = earlierStamp(local.createdAt, remote.createdAt) || ""
 
@@ -607,6 +631,25 @@ function mergeStores(local, remote) {
   for (k in ((local && local.days) || {})) keys[k] = true
   for (k in ((remote && remote.days) || {})) keys[k] = true
 
+  // A task id belongs to exactly one day. The two files can disagree about
+  // which — a hand edit, or a sync tool reviving an older copy — and unioning
+  // per day would then place the same id under both, which every later pass
+  // reads as two tasks. Settle it once, earliest day wins.
+  var dayOf = {}
+  var side, sk, sl, si, sid
+  for (var pass = 0; pass < 2; pass++) {
+    side = (pass === 0 ? local : remote)
+    var sdays = (side && side.days) || {}
+    for (sk in sdays) {
+      if (!Object.prototype.hasOwnProperty.call(sdays, sk)) continue
+      sl = sdays[sk]
+      for (si = 0; si < sl.length; si++) {
+        sid = sl[si].id
+        if (dayOf[sid] === undefined || sk < dayOf[sid]) dayOf[sid] = sk
+      }
+    }
+  }
+
   for (var day in keys) {
     var l = rawTasksFor(local, day)
     var r = rawTasksFor(remote, day)
@@ -618,17 +661,96 @@ function mergeStores(local, remote) {
     var seen = {}
     for (var j = 0; j < l.length; j++) {
       var lt = l[j]
-      if (seen[lt.id]) continue
+      if (seen[lt.id] || dayOf[lt.id] !== day) continue
       seen[lt.id] = true
       merged.push(byId[lt.id] ? mergeTask(lt, byId[lt.id]) : lt)
     }
     for (var m = 0; m < r.length; m++) {
-      if (seen[r[m].id]) continue
+      if (seen[r[m].id] || dayOf[r[m].id] !== day) continue
       seen[r[m].id] = true
       merged.push(r[m])
     }
 
     if (merged.length) out.days[day] = merged
+  }
+  return collapseLineages(out)
+}
+
+// Two machines that migrated the same task to DIFFERENT days each made their
+// own copy before they met. Union alone leaves both, and you are holding the
+// same work twice on two different days.
+//
+// The copies have different ids — they have to, they are on different days —
+// but they share a root, so they can be recognised as one task and folded back
+// together.
+//
+// The survivor is the copy on the earliest day, tie-broken by id: deterministic
+// on both machines, and it errs toward showing you the work sooner rather than
+// later. Its fields absorb every sibling first, so a completion or a rename
+// made on the losing copy is not thrown away; the siblings then become deletion
+// markers so the collapse propagates like any other delete.
+function collapseLineages(store) {
+  var days = (store && store.days) || {}
+
+  // Gather the live copies of each root. Migrated and deleted entries are
+  // history and never collapse.
+  var byRoot = {}
+  var day, i, list, task, key
+  for (day in days) {
+    if (!Object.prototype.hasOwnProperty.call(days, day)) continue
+    list = days[day]
+    for (i = 0; i < list.length; i++) {
+      task = list[i]
+      if (task.deleted || task.migratedTo) continue
+      key = task.root || task.id
+      if (!byRoot[key]) byRoot[key] = []
+      byRoot[key].push({ day: day, task: task })
+    }
+  }
+
+  var winners = {}
+  var losers = {}
+  var found = false
+  for (key in byRoot) {
+    var group = byRoot[key]
+    if (group.length < 2) continue
+    found = true
+    group.sort(function (a, b) {
+      if (a.day !== b.day) return a.day < b.day ? -1 : 1
+      return a.task.id < b.task.id ? -1 : 1
+    })
+    var survivor = group[0].task
+    for (i = 1; i < group.length; i++) {
+      // mergeTask keeps the left-hand id, so the survivor absorbs the sibling's
+      // done/text/migrations without inheriting its identity or its day.
+      var absorbed = mergeTask(survivor, group[i].task)
+      absorbed.id = survivor.id
+      absorbed.root = survivor.root || survivor.id
+      absorbed.migratedTo = null
+      survivor = absorbed
+      losers[group[i].task.id] = group[i].task
+    }
+    winners[group[0].task.id] = survivor
+  }
+
+  if (!found) return store
+
+  var out = { version: SCHEMA_VERSION, days: {} }
+  for (day in days) {
+    if (!Object.prototype.hasOwnProperty.call(days, day)) continue
+    out.days[day] = days[day].map(function (t) {
+      if (winners[t.id] && !t.deleted && !t.migratedTo) return winners[t.id]
+      if (losers[t.id] && !t.deleted && !t.migratedTo) {
+        var gone = {}
+        for (var k in t) gone[k] = t[k]
+        gone.deleted = true
+        // Derived from the task, never from the clock: both machines must
+        // produce byte-identical results or they write back at each other.
+        gone.deletedAt = t.migratedAt || t.updatedAt || t.createdAt || ""
+        return gone
+      }
+      return t
+    })
   }
   return out
 }

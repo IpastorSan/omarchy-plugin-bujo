@@ -153,14 +153,19 @@ One JSON file, keyed by date, written atomically:
   "days": {
     "2026-08-27": [
       {
-        "id": "mtb8jv78-0",
+        "id": "mtbaqzdk-7d703430-0",
+        "root": "mtbaqzdk-7d703430-0",
         "text": "Ship the plugin",
         "done": false,
         "createdAt": "2026-08-25T09:14:00.000Z",
         "doneAt": null,
         "origin": "2026-08-25",
         "migrations": 2,
-        "migratedTo": null
+        "migratedTo": null,
+        "migratedAt": null,
+        "updatedAt": "2026-08-27T09:14:00.000Z",
+        "deleted": false,
+        "deletedAt": null
       }
     ]
   }
@@ -203,7 +208,7 @@ What each field does when the two machines disagree:
 | Finished on either | finished, keeping the earlier completion time |
 | Deleted on either | deleted — this outranks finished |
 | Edited on both | the later edit wins, by `updatedAt` |
-| Migrated on both to the same day | one task, not two |
+| Migrated on both, to any days | one task, not two |
 | `migrations` count | the higher one |
 | Order within a day | stays local — it is what `J`/`K` control |
 
@@ -214,11 +219,26 @@ Two consequences worth knowing:
   tell "new over there" from "deleted over here", and every task you deleted on
   one machine would be resurrected by the other. Deleted tasks never appear in
   the list, the counts, or the calendar.
-- **Migrating the same task to *different* days on two offline machines leaves a
-  duplicate.** Each machine made its own copy before they met, and a two-way
-  merge with no common ancestor cannot know they are the same work. Migrating to
-  the *same* day — what the backlog banner does, so the overwhelmingly common
-  case — collapses to one task.
+- **A task keeps its identity across migrations.** Every entry carries a `root`
+  alongside its `id`: the id names one copy on one day, the root names the work
+  itself and survives every hop. If two machines migrate the same task to
+  *different* days, the copies have different ids but the same root, so the
+  merge recognises them as one task and folds them together — the copy on the
+  earliest day survives, having first absorbed anything done to its siblings, so
+  a completion or a rename made on the losing copy is not thrown away. The
+  survivor may land on a day already past, in which case it simply shows up in
+  the backlog banner and you pull it forward again.
+
+### What it does not do
+
+Order within a day is not merged — it stays local, because that is what `J`/`K`
+control and a canonical sort would mean one machine silently rearranging the
+other's list on every meeting.
+
+Nothing here is a substitute for the sync tool doing its job. If Syncthing hands
+you a `.sync-conflict-*` file, the plugin never sees it; the merge only runs on
+the file `statePath` points at. Delete the conflict copy, or merge it in by
+hand.
 
 ### Device identity
 

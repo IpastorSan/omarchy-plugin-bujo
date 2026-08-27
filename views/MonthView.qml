@@ -209,7 +209,7 @@ Item {
         text: "Back to the day"
         color: view.accent
         font.family: view.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Style.font.bodySmall
         MouseArea {
           anchors.fill: parent
           cursorShape: Qt.PointingHandCursor
@@ -221,7 +221,7 @@ Item {
         text: "m · esc"
         color: view.dim
         font.family: view.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Style.font.bodySmall
       }
     }
   }

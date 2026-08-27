@@ -350,6 +350,40 @@ Item {
       onClicked: if (view.panel) view.panel.migrateViewed()
     }
 
+    PanelSeparator { Layout.fillWidth: true; foreground: view.foreground }
+
+    // Where the other two screens are, and the keys that get there. Without
+    // this the calendar and the summary are reachable only by knowing `m` and
+    // `s`, and the key list that would tell you is itself behind `?`. Laid out
+    // like the calendar's own footer: the destination in accent, its key dim
+    // beside it.
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: Style.space(16)
+
+      NavLink {
+        glyph: "\u{F00ED}"
+        label: "Calendar"
+        keyHint: "m"
+        onPicked: if (view.panel) view.panel.view = "month"
+      }
+
+      NavLink {
+        glyph: "\u{F0238}"
+        label: "Summary"
+        keyHint: "s"
+        onPicked: if (view.panel) view.panel.view = "summary"
+      }
+
+      Item { Layout.fillWidth: true }
+
+      NavLink {
+        label: "keys"
+        keyHint: "?"
+        onPicked: if (view.panel) view.panel.showHelp = !view.panel.showHelp
+      }
+    }
+
     Text {
       Layout.fillWidth: true
       visible: view.panel ? view.panel.showHelp : false
@@ -359,6 +393,63 @@ Item {
       font.family: view.fontFamily
       font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap
+    }
+  }
+
+  // A glyph-plus-label text link with its key beside it.
+  //
+  // Item-rooted, not Row-rooted: a Row positions every child, so the MouseArea
+  // that makes this clickable would be laid out as a third column and its
+  // anchors.fill would fight the Row. That is what made the two links pile up
+  // on top of each other.
+  component NavLink: Item {
+    id: link
+    property string glyph: ""
+    property string label: ""
+    property string keyHint: ""
+    signal picked()
+
+    implicitWidth: linkRow.implicitWidth
+    implicitHeight: linkRow.implicitHeight
+
+    Row {
+      id: linkRow
+      spacing: Style.space(5)
+
+      // bodySmall, not caption: at this theme's caption size a mono lowercase
+      // "m" renders as a solid block -- the three stems merge -- which makes
+      // both the key hint and the word "Summary" unreadable.
+      Text {
+        visible: link.glyph !== ""
+        text: link.glyph
+        color: view.accent
+        font.family: view.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        text: link.label
+        color: view.accent
+        font.family: view.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        visible: link.keyHint !== ""
+        text: link.keyHint
+        color: view.dim
+        font.family: view.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      // Caption-height text is about a ten-pixel target on its own.
+      anchors.margins: -Style.space(5)
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: link.picked()
     }
   }
 }

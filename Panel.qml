@@ -181,9 +181,13 @@ Panel {
       // and replacing the journal in the middle of the open transition
       // re-evaluates every binding under a panel that is still being laid out.
       Qt.callLater(store.reloadNow)
-      // Reopening on a stale day is disorienting; the panel always lands on
-      // today unless the user is mid-navigation in the same session.
-      if (Model.daysBetween(root.viewedKey, root.todayKey) !== 0 && root.view === "day") root.goToday()
+      // The panel always lands on today's list. Reopening on the calendar you
+      // happened to close from, or on a day from last week, is disorienting —
+      // the day is the primary screen and the other two are excursions. The
+      // IPC view()/day() calls open first and select after, so an explicit
+      // destination still wins over this.
+      if (root.view !== "day") root.view = "day"
+      if (Model.daysBetween(root.viewedKey, root.todayKey) !== 0) root.goToday()
       Qt.callLater(function () { keyCatcher.forceActiveFocus() })
     }
   }

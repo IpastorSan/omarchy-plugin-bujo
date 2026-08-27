@@ -195,15 +195,28 @@ just test       # node --test — the migration and stats logic
 just restart    # sync into the live shell, restart it, query the IPC target
 ```
 
-Two things worth knowing before you debug this:
+Saving a file under `~/.config/omarchy/plugins/` hot-reloads the plugin — the
+shell watches the tree with `inotifywait -m -r` on a 150 ms debounce. `just
+install-dev` is usually the whole loop; the bar pill picks up the new code
+without a restart.
+
+Three things worth knowing before you debug this:
 
 - `qmllint` only distinguishes "parses" from "does not", and both it and
   `qmlformat` hard-fail on any file containing a Quickshell `IpcHandler` —
   including Omarchy's own. `just restart` followed by `omarchy-shell bujo
   status` is the check that actually proves the QML loaded.
 - `omarchy-shell shell rescanPlugins` does **not** evict a component that failed
-  to compile. After a load error, a fixed file will keep reporting the old error
-  until you restart the shell.
+  to compile. After a load *error*, a fixed file keeps reporting the old error
+  until the shell restarts. This is the one case that genuinely needs `just
+  restart`.
+- **The IPC target does not survive a hot reload.** A bar widget is instantiated
+  once per monitor, so two `IpcHandler`s compete for the `bujo` target and one
+  loses with a warning. After a reload the target is stranded on an instance
+  whose surface is gone: `omarchy-shell bujo open` reports success and shows
+  nothing. Mutating calls like `add` still work, and clicking the pill still
+  works — only IPC-driven *opening* is affected. Restart before testing the
+  panel through IPC.
 
 ## License
 

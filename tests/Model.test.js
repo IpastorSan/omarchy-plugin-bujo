@@ -245,6 +245,19 @@ test("a deletion marker is pruned once no device could still be holding it", () 
   assert.equal(Object.keys(later.days).length, 0, "and the empty day goes with it")
 })
 
+test("a migrated entry cannot be deleted, because that would rewrite the day", () => {
+  // The tombstone is what keeps a past day's percentage honest. Toggling and
+  // editing already refuse it; deleting must too, or pressing x on one silently
+  // turns a half-finished day into a perfect one.
+  let s = seed({ "2026-08-25": ["+done one", "open one"] })
+  s = M.carryOver(s, "2026-08-25", "2026-08-27", T2)
+  assert.equal(M.dayCompletion(s, "2026-08-25"), 0.5)
+
+  const stone = M.rawTasksFor(s, "2026-08-25").find((t) => t.migratedTo)
+  assert.equal(M.deleteTask(s, "2026-08-25", stone.id, T2), s, "refused")
+  assert.equal(M.dayCompletion(s, "2026-08-25"), 0.5, "history is not editable")
+})
+
 test("a deleted task cannot be toggled, edited, or migrated", () => {
   let s = seed({ "2026-08-27": ["a"] })
   const id = M.rawTasksFor(s, "2026-08-27")[0].id

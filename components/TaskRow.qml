@@ -89,9 +89,15 @@ CursorSurface {
     // Where a migrated entry went.
     Text {
       visible: row.migrated
+      // Guarded, not just `visible`. QML evaluates a binding whether or not the
+      // item is shown, so on every ordinary row this ran parseKey(null) into
+      // formatDate and logged an error per row per repaint.
+      //
       // Model.parseKey, not new Date(key): the latter reads "2026-08-27" as UTC
       // midnight, which formats as the 26th for anyone west of Greenwich.
-      text: "→ " + Qt.formatDate(Model.parseKey(row.task.migratedTo), "d MMM")
+      text: row.migrated
+        ? "→ " + Qt.formatDate(Model.parseKey(row.task.migratedTo), "d MMM")
+        : ""
       color: row.foreground
       opacity: 0.45
       font.family: row.fontFamily

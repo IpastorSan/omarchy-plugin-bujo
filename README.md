@@ -196,6 +196,13 @@ Use the same path on every machine, pointed at the same synced directory
 (Syncthing, Dropbox, a git checkout — anything that reproduces the file). Set it
 back to `'""'` to go local again.
 
+**Changing `statePath` carries your existing journal with you.** The panel keeps
+what it is holding and merges it into whatever is at the new location, so
+switching a machine over to a shared folder brings its history along rather than
+stranding it. That is what you want the first time. It also means pointing at a
+path expecting a clean slate will not give you one — empty the journal first, or
+point somewhere the tasks are welcome.
+
 **The two devices merge rather than overwrite.** When the file changes
 underneath it, the panel does not adopt the new contents wholesale — it combines
 them with what it already has and, if its own side had anything the file did

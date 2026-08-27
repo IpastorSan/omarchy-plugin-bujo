@@ -450,7 +450,11 @@ function deleteTask(store, key, id, nowIso) {
   if (!list) return store
   var changed = false
   out.days[key] = list.map(function (task) {
-    if (task.id !== id || task.deleted) return task
+    // Migrated entries are refused for the same reason toggling and editing
+    // them is: the tombstone is what keeps the day's percentage honest, and
+    // removing it turns a half-finished day into a perfect one. History is a
+    // record here, not a list.
+    if (task.id !== id || task.deleted || isMigrated(task)) return task
     changed = true
     var copy = {}
     for (var k in task) copy[k] = task[k]

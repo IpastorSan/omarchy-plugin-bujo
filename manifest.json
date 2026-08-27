@@ -6,8 +6,12 @@
   "author": "IpastorSan",
   "license": "MIT",
   "description": "A bullet journal in the bar. Tasks belong to a day; migrate what you didn't finish.",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "Panel.qml" },
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
   "barWidget": {
     "displayName": "Bujo",
     "description": "Dated task list with a calendar, completion stats, and one-click migration.",
@@ -27,7 +31,12 @@
         "type": "enum",
         "label": "Bar shows",
         "description": "What the pill displays for today: done/total, tasks left, percent, or the icon alone.",
-        "options": ["ratio", "count", "percent", "icon"],
+        "options": [
+          "ratio",
+          "count",
+          "percent",
+          "icon"
+        ],
         "defaultValue": "ratio"
       },
       {
@@ -35,7 +44,11 @@
         "type": "enum",
         "label": "Week starts on",
         "description": "Leave on locale to follow your system's first day of the week.",
-        "options": ["locale", "monday", "sunday"],
+        "options": [
+          "locale",
+          "monday",
+          "sunday"
+        ],
         "defaultValue": "locale"
       },
       {
@@ -55,7 +68,7 @@
         "key": "statePath",
         "type": "path",
         "label": "Task file",
-        "description": "Leave empty for ~/.local/state/omarchy/bujo/tasks.json. Point it at a synced folder to carry the journal between machines.",
+        "description": "Leave empty for ~/.local/state/omarchy/bujo/tasks.json. Point it at the same synced folder on two machines and they share one journal: changes are merged, not overwritten. See the README section 'Using it on more than one device'.",
         "defaultValue": ""
       }
     ]

@@ -76,16 +76,16 @@ Panel {
   readonly property var viewedStats: Model.dayStats(root.journal, root.viewedKey)
 
   function addTask(text) {
-    store.commit(Model.addTask(root.journal, root.viewedKey, text, root.nowIso()))
+    store.commit(Model.addTask(root.journal, root.viewedKey, text, root.nowIso(), store.deviceId))
   }
   function toggleTask(id) {
     store.commit(Model.toggleTask(root.journal, root.viewedKey, id, root.nowIso()))
   }
   function editTask(id, text) {
-    store.commit(Model.editTask(root.journal, root.viewedKey, id, text))
+    store.commit(Model.editTask(root.journal, root.viewedKey, id, text, root.nowIso()))
   }
   function deleteTask(id) {
-    store.commit(Model.deleteTask(root.journal, root.viewedKey, id))
+    store.commit(Model.deleteTask(root.journal, root.viewedKey, id, root.nowIso()))
   }
   function moveTask(id, delta) {
     store.commit(Model.moveTask(root.journal, root.viewedKey, id, delta))
@@ -288,7 +288,7 @@ Panel {
     function add(text: string): string {
       var clean = String(text || "").trim()
       if (!clean) return "empty"
-      store.commit(Model.addTask(root.journal, root.todayKey, clean, root.nowIso()))
+      store.commit(Model.addTask(root.journal, root.todayKey, clean, root.nowIso(), store.deviceId))
       return "ok"
     }
 
@@ -312,6 +312,7 @@ Panel {
         backlog: root.backlogCount,
         streak: Model.streak(root.journal, root.todayKey),
         path: store.resolvedPath,
+        device: store.deviceId,
         ready: store.ready,
         loads: store.loadCount,
         changes: store.changeCount,

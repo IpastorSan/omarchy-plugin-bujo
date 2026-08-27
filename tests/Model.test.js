@@ -158,11 +158,10 @@ test("normalizeText collapses a pasted paragraph into one line", () => {
   assert.equal(M.tasksFor(s, "2026-08-27")[0].text, "first second third")
 })
 
-test("serialize prunes empty days and sorts keys for clean diffs", () => {
+test("serialize sorts keys for clean diffs and drops days with nothing in them", () => {
   let s = seed({ "2026-08-27": ["b"], "2026-08-25": ["a"] })
-  s = M.deleteTask(s, "2026-08-27", M.tasksFor(s, "2026-08-27")[0].id)
   const text = M.serialize(s)
-  assert.ok(!text.includes("2026-08-27"))
+  assert.deepEqual(Object.keys(JSON.parse(text).days), ["2026-08-25", "2026-08-27"])
   assert.equal(JSON.parse(text).days["2026-08-25"].length, 1)
 })
 
@@ -172,12 +171,12 @@ test("mutations do not touch the store they were given", () => {
   const id = M.tasksFor(before, "2026-08-27")[0].id
   M.addTask(before, "2026-08-27", "b", T2)
   M.toggleTask(before, "2026-08-27", id, T2)
-  M.deleteTask(before, "2026-08-27", id)
+  M.deleteTask(before, "2026-08-27", id, T2)
   M.carryOver(before, "2026-08-27", "2026-08-28", T2)
   assert.equal(JSON.stringify(before), snapshot)
 })
 
-test("newId is deterministic and never collides", () => {
+test("newId is deterministic and never collides within one device", () => {
   let s = M.emptyStore()
   const ids = new Set()
   for (let i = 0; i < 50; i++) {
@@ -201,10 +200,36 @@ test("toggleTask stamps and clears doneAt", () => {
   assert.equal(M.tasksFor(s, "2026-08-27")[0].doneAt, null)
 })
 
-test("deleting the last task removes the day entirely", () => {
+test("deleting hides the task but keeps a marker so the delete can travel", () => {
   let s = seed({ "2026-08-27": ["a"] })
-  s = M.deleteTask(s, "2026-08-27", M.tasksFor(s, "2026-08-27")[0].id)
-  assert.equal(Object.keys(s.days).length, 0)
+  const id = M.tasksFor(s, "2026-08-27")[0].id
+  s = M.deleteTask(s, "2026-08-27", id, T2)
+  assert.deepEqual(M.tasksFor(s, "2026-08-27"), [], "gone from the day")
+  assert.equal(M.dayCompletion(s, "2026-08-27"), null, "and from the calendar")
+  assert.equal(M.dayStats(s, "2026-08-27").total, 0, "and from the counts")
+  const raw = M.rawTasksFor(s, "2026-08-27")
+  assert.equal(raw.length, 1)
+  assert.equal(raw[0].deleted, true)
+  assert.equal(raw[0].deletedAt, T2)
+})
+
+test("a deletion marker is pruned once no device could still be holding it", () => {
+  let s = seed({ "2026-08-27": ["a"] })
+  s = M.deleteTask(s, "2026-08-27", M.tasksFor(s, "2026-08-27")[0].id, "2026-08-27T09:00:00.000Z")
+  const soon = M.pruneDeleted(s, "2026-09-10T09:00:00.000Z", 30)
+  assert.equal(M.rawTasksFor(soon, "2026-08-27").length, 1, "14 days is not long enough")
+  const later = M.pruneDeleted(s, "2026-10-15T09:00:00.000Z", 30)
+  assert.equal(Object.keys(later.days).length, 0, "and the empty day goes with it")
+})
+
+test("a deleted task cannot be toggled, edited, or migrated", () => {
+  let s = seed({ "2026-08-27": ["a"] })
+  const id = M.rawTasksFor(s, "2026-08-27")[0].id
+  s = M.deleteTask(s, "2026-08-27", id, T2)
+  assert.equal(M.toggleTask(s, "2026-08-27", id, T2), s)
+  assert.equal(M.editTask(s, "2026-08-27", id, "changed", T2), s)
+  assert.equal(M.carryOver(s, "2026-08-27", "2026-08-28", T2), s)
+  assert.equal(M.deleteTask(s, "2026-08-27", id, T2), s, "deleting twice is a no-op")
 })
 
 test("moveTask reorders and refuses to run off either end", () => {
@@ -220,9 +245,9 @@ test("moveTask reorders and refuses to run off either end", () => {
 test("edits and toggles against an unknown id return the same store", () => {
   const s = seed({ "2026-08-27": ["a"] })
   assert.equal(M.toggleTask(s, "2026-08-27", "nope", T2), s)
-  assert.equal(M.editTask(s, "2026-08-27", "nope", "x"), s)
-  assert.equal(M.deleteTask(s, "2026-08-27", "nope"), s)
-  assert.equal(M.editTask(s, "2026-08-27", M.tasksFor(s, "2026-08-27")[0].id, "   "), s)
+  assert.equal(M.editTask(s, "2026-08-27", "nope", "x", T2), s)
+  assert.equal(M.deleteTask(s, "2026-08-27", "nope", T2), s)
+  assert.equal(M.editTask(s, "2026-08-27", M.tasksFor(s, "2026-08-27")[0].id, "   ", T2), s)
   assert.equal(M.addTask(s, "2026-08-27", "   ", T2), s)
   assert.equal(M.addTask(s, "not-a-date", "x", T2), s)
 })
@@ -439,4 +464,173 @@ test("percent rounds rather than truncates", () => {
   assert.equal(M.percent(2 / 3), 67)
   assert.equal(M.percent(0), 0)
   assert.equal(M.percent(1), 100)
+})
+
+// --- merging two devices -----------------------------------------------------
+//
+// The property that matters is convergence: whichever order the two machines
+// see each other's writes in, they must end up holding the same journal. Every
+// test below that calls `converge` is asserting exactly that, by merging in
+// both directions and comparing.
+
+// Compare content, not order. Order within a day follows the local list by
+// design — it is what J/K controls — so it is the one thing allowed to differ.
+function content(store) {
+  const out = {}
+  for (const day of Object.keys(store.days).sort()) {
+    out[day] = M.rawTasksFor(store, day)
+      .map((t) => JSON.stringify(t, Object.keys(t).sort()))
+      .sort()
+  }
+  return out
+}
+
+function converge(a, b) {
+  const ab = M.mergeStores(a, b)
+  const ba = M.mergeStores(b, a)
+  assert.deepEqual(content(ab), content(ba), "merge must not depend on which side is local")
+  // And settling twice must change nothing, or the two devices write back and
+  // forth forever.
+  assert.deepEqual(content(M.mergeStores(ab, ba)), content(ab), "merge must be idempotent")
+  return ab
+}
+
+test("a task added on each device survives on both", () => {
+  const laptop = M.addTask(M.emptyStore(), "2026-08-27", "from the laptop", T2, "aaaa")
+  const desktop = M.addTask(M.emptyStore(), "2026-08-27", "from the desktop", T2, "bbbb")
+  const merged = converge(laptop, desktop)
+  assert.deepEqual(
+    M.tasksFor(merged, "2026-08-27").map((t) => t.text).sort(),
+    ["from the desktop", "from the laptop"]
+  )
+})
+
+test("two devices adding in the same millisecond do not collide into one task", () => {
+  // This is the bug the device tag exists to prevent. Without it both sides
+  // mint the same id and the merge welds two different tasks together.
+  const a = M.addTask(M.emptyStore(), "2026-08-27", "call the bank", T2, "aaaa")
+  const b = M.addTask(M.emptyStore(), "2026-08-27", "renew the domain", T2, "bbbb")
+  assert.notEqual(
+    M.tasksFor(a, "2026-08-27")[0].id,
+    M.tasksFor(b, "2026-08-27")[0].id
+  )
+  assert.equal(M.tasksFor(converge(a, b), "2026-08-27").length, 2)
+})
+
+test("finishing on one device wins, and keeps the earlier completion time", () => {
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "ship it", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const done = M.toggleTask(base, "2026-08-27", id, T1)
+  const merged = converge(done, base)
+  const task = M.tasksFor(merged, "2026-08-27")[0]
+  assert.equal(task.done, true)
+  assert.equal(task.doneAt, T1)
+})
+
+test("deleting on one device propagates instead of being resurrected", () => {
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "drop me", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const gone = M.deleteTask(base, "2026-08-27", id, T1)
+  const merged = converge(gone, base)
+  assert.deepEqual(M.tasksFor(merged, "2026-08-27"), [], "the other device must not bring it back")
+  assert.equal(M.rawTasksFor(merged, "2026-08-27")[0].deleted, true)
+})
+
+test("deleting outranks finishing", () => {
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "x", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const merged = converge(
+    M.deleteTask(base, "2026-08-27", id, T1),
+    M.toggleTask(base, "2026-08-27", id, T1)
+  )
+  assert.deepEqual(M.tasksFor(merged, "2026-08-27"), [])
+})
+
+test("the later edit wins the text, and a tie keeps what is already here", () => {
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "original", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const early = M.editTask(base, "2026-08-27", id, "edited early", T1)
+  const late = M.editTask(base, "2026-08-27", id, "edited late", T2)
+  assert.equal(M.tasksFor(converge(early, late), "2026-08-27")[0].text, "edited late")
+  // Same instant on both sides: local text stands, and both sides still agree
+  // on every other field.
+  const tieA = M.editTask(base, "2026-08-27", id, "aaa", T1)
+  const tieB = M.editTask(base, "2026-08-27", id, "bbb", T1)
+  assert.equal(M.mergeStores(tieA, tieB).days["2026-08-27"][0].text, "aaa")
+  assert.equal(M.mergeStores(tieB, tieA).days["2026-08-27"][0].text, "bbb")
+})
+
+test("both devices pulling the same backlog forward yields one task, not two", () => {
+  // The realistic collision: you open the journal on both machines the same
+  // morning and hit the backlog banner on each. Deriving the migrated copy's
+  // id from the source and the target is what makes these the same task.
+  let base = M.addTask(M.emptyStore(), "2026-08-25", "call the accountant", T0, "aaaa")
+  const laptop = M.migrateBacklog(base, "2026-08-27", "2026-08-27", T1)
+  const desktop = M.migrateBacklog(base, "2026-08-27", "2026-08-27", T2)
+  const merged = converge(laptop, desktop)
+  assert.equal(M.tasksFor(merged, "2026-08-27").length, 1, "one copy, not one per device")
+  assert.equal(M.tasksFor(merged, "2026-08-27")[0].migrations, 1)
+  assert.equal(M.rawTasksFor(merged, "2026-08-25")[0].migratedTo, "2026-08-27")
+})
+
+test("migrating to different days on each device settles deterministically", () => {
+  let base = M.addTask(M.emptyStore(), "2026-08-25", "renew the domain", T0, "aaaa")
+  const toThe26th = M.carryOver(base, "2026-08-25", "2026-08-26", T1)
+  const toThe27th = M.carryOver(base, "2026-08-25", "2026-08-27", T2)
+  const merged = converge(toThe26th, toThe27th)
+  // The earlier migration decided where the original went...
+  assert.equal(M.rawTasksFor(merged, "2026-08-25")[0].migratedTo, "2026-08-26")
+  // ...but each device already made its own copy, and a two-way merge with no
+  // common ancestor cannot know they are the same work. This is the one case
+  // that leaves a duplicate, and it is documented as such.
+  assert.equal(M.tasksFor(merged, "2026-08-26").length, 1)
+  assert.equal(M.tasksFor(merged, "2026-08-27").length, 1)
+})
+
+test("migrations never counts down", () => {
+  let base = M.addTask(M.emptyStore(), "2026-08-25", "x", T0, "aaaa")
+  const once = M.carryOver(base, "2026-08-25", "2026-08-26", T1)
+  const twice = M.carryOver(once, "2026-08-26", "2026-08-27", T2)
+  const merged = converge(twice, once)
+  assert.equal(M.tasksFor(merged, "2026-08-27")[0].migrations, 2)
+})
+
+test("a device that has never seen the journal adopts it whole", () => {
+  const full = seed({ "2026-08-25": ["+a", "b"], "2026-08-27": ["c"] })
+  const merged = converge(M.emptyStore(), full)
+  assert.deepEqual(content(merged), content(full))
+})
+
+test("merging a journal with itself changes nothing", () => {
+  const s = seed({ "2026-08-25": ["+a", "b"], "2026-08-26": ["c"] })
+  assert.deepEqual(content(M.mergeStores(s, s)), content(s))
+})
+
+test("a three-way round trip converges after one exchange each way", () => {
+  // laptop and desktop both diverge from a shared base, then each reads the
+  // other's file once. Both must end up holding the same journal.
+  const base = seed({ "2026-08-27": ["shared"] })
+  const sharedId = M.tasksFor(base, "2026-08-27")[0].id
+
+  let laptop = M.addTask(base, "2026-08-27", "laptop only", T1, "aaaa")
+  laptop = M.toggleTask(laptop, "2026-08-27", sharedId, T1)
+
+  let desktop = M.addTask(base, "2026-08-27", "desktop only", T1, "bbbb")
+  desktop = M.editTask(desktop, "2026-08-27", sharedId, "shared, renamed", T2)
+
+  const laptopSees = M.mergeStores(laptop, desktop)
+  const desktopSees = M.mergeStores(desktop, laptop)
+  assert.deepEqual(content(laptopSees), content(desktopSees))
+
+  const settled = M.tasksFor(laptopSees, "2026-08-27")
+  assert.equal(settled.length, 3)
+  const shared = settled.find((t) => t.id === sharedId)
+  assert.equal(shared.done, true, "the laptop finished it")
+  assert.equal(shared.text, "shared, renamed", "the desktop renamed it later")
+})
+
+test("merge tolerates a corrupt file on the other side", () => {
+  const mine = seed({ "2026-08-27": ["keep me"] })
+  const merged = M.mergeStores(mine, M.normalizeStore('{"days":{"2026-08-27":[{"text"'))
+  assert.deepEqual(content(merged), content(mine))
 })

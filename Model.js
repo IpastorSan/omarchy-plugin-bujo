@@ -206,7 +206,17 @@ function normalizeTask(raw, dayKey) {
     // Set on the entry left behind when a task is migrated forward: the day it
     // went to. A tombstone is not actionable and is not open, but it still
     // counts against the day it was written on.
-    migratedTo: isKey(raw.migratedTo) ? raw.migratedTo : null
+    migratedTo: isKey(raw.migratedTo) ? raw.migratedTo : null,
+    migratedAt: typeof raw.migratedAt === "string" ? raw.migratedAt : null,
+    // Last time a person changed this task. Only the merge reads it, to settle
+    // the one field two devices can genuinely disagree about: the text.
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : "",
+    // Deleting is a soft delete, because a merge that only unions cannot tell
+    // "new over there" from "deleted over here" — without a marker, every task
+    // you delete on one device is resurrected by the other. Pruned once the
+    // marker is older than every device could plausibly be offline.
+    deleted: raw.deleted === true,
+    deletedAt: typeof raw.deletedAt === "string" ? raw.deletedAt : null
   }
 }
 
@@ -261,19 +271,38 @@ function pruneEmptyDays(store) {
   return out
 }
 
-// A task is in exactly one of three states. Only a live one can be acted on.
+// A task is in exactly one of three visible states. Only a live one can be
+// acted on. Deleted is a fourth, invisible state that exists solely so the
+// merge can propagate a deletion.
 function isMigrated(task) {
   return !!(task && task.migratedTo)
 }
 
 function isOpen(task) {
-  return !!task && !task.done && !task.migratedTo
+  return !!task && !task.done && !task.migratedTo && !task.deleted
 }
 
-function tasksFor(store, key) {
+function isDeleted(task) {
+  return !!(task && task.deleted)
+}
+
+// Everything stored under a day, deletion markers included. The merge and the
+// serializer want this; nothing else should.
+function rawTasksFor(store, key) {
   var days = (store && store.days) || {}
   var list = days[key]
   return Array.isArray(list) ? list : []
+}
+
+// What is actually on the day. Every caller that renders or counts wants this
+// one, so a deleted task drops out of the list, the stats, and the calendar
+// without any of them having to know deletion markers exist.
+function tasksFor(store, key) {
+  var list = rawTasksFor(store, key)
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].deleted) return list.filter(function (t) { return !t.deleted })
+  }
+  return list
 }
 
 function allIds(store) {
@@ -287,13 +316,24 @@ function allIds(store) {
   return used
 }
 
-// Derived from the timestamp and the ids already in the store rather than from
-// Math.random(), so the same inputs always produce the same id and the tests
-// can assert on it.
-function newId(store, nowIso) {
+// A short, filesystem- and JSON-safe tag for the machine that made a task.
+function deviceTag(deviceId) {
+  var clean = String(deviceId || "").toLowerCase().replace(/[^a-z0-9]/g, "")
+  return clean ? clean.slice(0, 8) : "local"
+}
+
+// Derived from the timestamp, the device, and the ids already in the store —
+// never from Math.random(), so the same inputs always produce the same id and
+// the tests can assert on it.
+//
+// The device tag is not decoration. The counter only avoids collisions inside
+// one store, so two machines adding a task in the same millisecond used to
+// mint the same id. Under whole-file sync that was invisible; under a merge it
+// silently welds two different tasks into one.
+function newId(store, nowIso, deviceId) {
   var base = Date.parse(nowIso)
   if (!isFinite(base)) base = 0
-  var stem = Math.floor(base).toString(36)
+  var stem = Math.floor(base).toString(36) + "-" + deviceTag(deviceId)
   var used = allIds(store)
   var n = 0
   var id = stem + "-" + n
@@ -301,23 +341,43 @@ function newId(store, nowIso) {
   return id
 }
 
+// The id of the copy a migration puts on the target day, derived from the task
+// it came from and where it landed.
+//
+// Deliberately not newId(): if two devices both migrate the same task to the
+// same day — which is exactly what "pull in the backlog" does on both machines
+// on the same morning — deriving the id makes them the same task, and the
+// merge collapses them. A fresh id on each side would leave you holding two.
+function migratedId(store, sourceId, toKey) {
+  var stem = String(sourceId) + ">" + String(toKey)
+  var used = allIds(store)
+  if (!used[stem]) return stem
+  var n = 1
+  while (used[stem + "-" + n]) n++
+  return stem + "-" + n
+}
+
 // ---------------------------------------------------------------------------
 // Mutations
 
-function addTask(store, key, text, nowIso) {
+function addTask(store, key, text, nowIso, deviceId) {
   var clean = normalizeText(text)
   if (!clean || !isKey(key)) return store
   var out = cloneStore(store)
   var list = (out.days[key] || []).slice()
   list.push({
-    id: newId(out, nowIso),
+    id: newId(out, nowIso, deviceId),
     text: clean,
     done: false,
     createdAt: String(nowIso || ""),
     doneAt: null,
     origin: key,
     migrations: 0,
-    migratedTo: null
+    migratedTo: null,
+    migratedAt: null,
+    updatedAt: String(nowIso || ""),
+    deleted: false,
+    deletedAt: null
   })
   out.days[key] = list
   return out
@@ -329,19 +389,20 @@ function toggleTask(store, key, id, nowIso) {
   if (!list) return store
   var changed = false
   out.days[key] = list.map(function (task) {
-    if (task.id !== id || isMigrated(task)) return task
+    if (task.id !== id || isMigrated(task) || isDeleted(task)) return task
     changed = true
     var done = !task.done
     var copy = {}
     for (var k in task) copy[k] = task[k]
     copy.done = done
     copy.doneAt = done ? String(nowIso || "") : null
+    copy.updatedAt = String(nowIso || "")
     return copy
   })
   return changed ? out : store
 }
 
-function editTask(store, key, id, text) {
+function editTask(store, key, id, text, nowIso) {
   var clean = normalizeText(text)
   if (!clean) return store
   var out = cloneStore(store)
@@ -349,25 +410,38 @@ function editTask(store, key, id, text) {
   if (!list) return store
   var changed = false
   out.days[key] = list.map(function (task) {
-    if (task.id !== id || isMigrated(task)) return task
+    if (task.id !== id || isMigrated(task) || isDeleted(task)) return task
     changed = true
     var copy = {}
     for (var k in task) copy[k] = task[k]
     copy.text = clean
+    // The merge settles a text disagreement by recency, so an edit that does
+    // not move this hand is an edit the other device will silently win.
+    copy.updatedAt = String(nowIso || task.updatedAt || "")
     return copy
   })
   return changed ? out : store
 }
 
-function deleteTask(store, key, id) {
+// A soft delete: the entry stays, marked, until pruneDeleted drops it. See the
+// comment on `deleted` in normalizeTask for why a merge cannot work otherwise.
+// tasksFor() filters these out, so nothing that renders or counts sees them.
+function deleteTask(store, key, id, nowIso) {
   var out = cloneStore(store)
   var list = out.days[key]
   if (!list) return store
-  var next = list.filter(function (task) { return task.id !== id })
-  if (next.length === list.length) return store
-  if (next.length) out.days[key] = next
-  else delete out.days[key]
-  return out
+  var changed = false
+  out.days[key] = list.map(function (task) {
+    if (task.id !== id || task.deleted) return task
+    changed = true
+    var copy = {}
+    for (var k in task) copy[k] = task[k]
+    copy.deleted = true
+    copy.deletedAt = String(nowIso || "")
+    copy.updatedAt = String(nowIso || "")
+    return copy
+  })
+  return changed ? out : store
 }
 
 function moveTask(store, key, id, delta) {
@@ -406,16 +480,19 @@ function carryOver(store, fromKey, toKey, nowIso) {
     if (!isOpen(task)) return task
     var moved = {}
     for (var k in task) moved[k] = task[k]
-    moved.id = newId(out, nowIso)
+    moved.id = migratedId(out, task.id, toKey)
     moved.migrations = Math.floor(Number(task.migrations) || 0) + 1
     moved.origin = isKey(task.origin) ? task.origin : fromKey
     moved.migratedTo = null
     moved.migratedAt = String(nowIso || "")
+    moved.updatedAt = String(nowIso || "")
     target.push(moved)
     // The copy is a new task with its own id; the original becomes the marker.
     var stone = {}
     for (var j in task) stone[j] = task[j]
     stone.migratedTo = toKey
+    stone.migratedAt = String(nowIso || "")
+    stone.updatedAt = String(nowIso || "")
     return stone
   })
 
@@ -433,6 +510,154 @@ function migrateBacklog(store, beforeKey, toKey, nowIso) {
     out = carryOver(out, keys[i], toKey, nowIso)
   }
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Merging two devices
+//
+// Plain file sync gives you no common ancestor and no ordering: two machines
+// hand you two whole files and you have to produce one. Everything below is a
+// two-way merge over the journal, and it only works because the task shape
+// already carries what a merge needs — a stable id, a creation day, a
+// migration count, and timestamps for the things that change.
+//
+// The rules are chosen so that merging is CONVERGENT: whichever order the two
+// devices see each other's writes in, they end up holding the same journal.
+// Every field either takes a monotonic step (done, deleted, migrated,
+// migrations) or is settled by a timestamp (text). Nothing is settled by "mine
+// wins", because "mine" is different on each machine and would never converge.
+
+function earlierStamp(a, b) {
+  var x = a || "", y = b || ""
+  if (!x) return y || null
+  if (!y) return x || null
+  return x <= y ? x : y
+}
+
+function laterStamp(a, b) {
+  var x = a || "", y = b || ""
+  if (!x) return y || ""
+  if (!y) return x || ""
+  return x >= y ? x : y
+}
+
+function mergeTask(local, remote) {
+  if (!local) return remote
+  if (!remote) return local
+
+  var out = {}
+  for (var k in local) out[k] = local[k]
+
+  // Text is the only field two people can genuinely disagree about, so it is
+  // the only one settled by recency. A tie keeps the local text; the tie can
+  // only happen when neither side edited since they last agreed.
+  var lu = local.updatedAt || "", ru = remote.updatedAt || ""
+  if (ru > lu) out.text = remote.text
+  out.updatedAt = laterStamp(lu, ru)
+
+  // Deleting outranks everything. If one machine says this is gone, it is
+  // gone — otherwise a delete could be undone by the other machine merely
+  // still remembering the task.
+  out.deleted = local.deleted === true || remote.deleted === true
+  out.deletedAt = out.deleted ? earlierStamp(local.deletedAt, remote.deletedAt) : null
+
+  // Finishing is monotonic: a task done on either machine is done. The first
+  // completion is the true one, so the earlier stamp survives.
+  out.done = local.done === true || remote.done === true
+  out.doneAt = out.done ? earlierStamp(local.doneAt, remote.doneAt) : null
+
+  // So is migrating. If both machines migrated it, the first one decided where
+  // it went; the target key breaks a stamp tie so the choice is deterministic
+  // rather than dependent on which file arrived first.
+  if (local.migratedTo && remote.migratedTo && local.migratedTo !== remote.migratedTo) {
+    var lm = local.migratedAt || "", rm = remote.migratedAt || ""
+    var localWins = lm === rm
+      ? local.migratedTo <= remote.migratedTo
+      : (lm && rm ? lm < rm : !!lm)
+    out.migratedTo = localWins ? local.migratedTo : remote.migratedTo
+  } else {
+    out.migratedTo = local.migratedTo || remote.migratedTo || null
+  }
+
+  // Independent of migratedTo, and NOT cleared when it is null: this stamp
+  // means "the last time a migration touched this task", which on a tombstone
+  // is when the work left and on a copy is when it arrived. Clearing it for
+  // copies — which have no migratedTo of their own — silently rewrote them on
+  // every merge, so two devices never stopped writing the file back at
+  // each other.
+  out.migratedAt = earlierStamp(local.migratedAt, remote.migratedAt)
+
+  out.migrations = Math.max(Number(local.migrations) || 0, Number(remote.migrations) || 0)
+  out.origin = earlierStamp(local.origin, remote.origin) || local.origin
+  out.createdAt = earlierStamp(local.createdAt, remote.createdAt) || ""
+
+  return out
+}
+
+// Union both journals by day, then by task id.
+//
+// Order within a day follows the local list, with tasks only the other machine
+// has appended after. Order is the one thing deliberately NOT converged: it is
+// what the J/K reordering controls, and forcing a canonical sort would mean one
+// machine silently rearranging the other's list every time they meet.
+function mergeStores(local, remote) {
+  var out = { version: SCHEMA_VERSION, days: {} }
+  var keys = {}
+  var k
+  for (k in ((local && local.days) || {})) keys[k] = true
+  for (k in ((remote && remote.days) || {})) keys[k] = true
+
+  for (var day in keys) {
+    var l = rawTasksFor(local, day)
+    var r = rawTasksFor(remote, day)
+
+    var byId = {}
+    for (var i = 0; i < r.length; i++) byId[r[i].id] = r[i]
+
+    var merged = []
+    var seen = {}
+    for (var j = 0; j < l.length; j++) {
+      var lt = l[j]
+      if (seen[lt.id]) continue
+      seen[lt.id] = true
+      merged.push(byId[lt.id] ? mergeTask(lt, byId[lt.id]) : lt)
+    }
+    for (var m = 0; m < r.length; m++) {
+      if (seen[r[m].id]) continue
+      seen[r[m].id] = true
+      merged.push(r[m])
+    }
+
+    if (merged.length) out.days[day] = merged
+  }
+  return out
+}
+
+// Drop deletion markers old enough that no device could still be carrying the
+// task. Until then they have to stay, or syncing resurrects deleted tasks.
+function pruneDeleted(store, nowIso, days) {
+  var horizon = Number(days)
+  if (!isFinite(horizon) || horizon <= 0) horizon = 30
+  var cutoff = Date.parse(nowIso)
+  if (!isFinite(cutoff)) return store
+  cutoff -= horizon * 86400000
+
+  var out = { version: SCHEMA_VERSION, days: {} }
+  var src = (store && store.days) || {}
+  var dropped = false
+  for (var day in src) {
+    if (!Object.prototype.hasOwnProperty.call(src, day)) continue
+    var kept = src[day].filter(function (task) {
+      if (!task.deleted) return true
+      var at = Date.parse(task.deletedAt || "")
+      if (!isFinite(at)) return true
+      if (at >= cutoff) return true
+      dropped = true
+      return false
+    })
+    if (kept.length) out.days[day] = kept
+  }
+  return dropped ? out : store
 }
 
 // ---------------------------------------------------------------------------

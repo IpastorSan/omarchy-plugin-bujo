@@ -167,13 +167,76 @@ One JSON file, keyed by date, written atomically:
 }
 ```
 
-Keys are sorted and the file is indented, so it diffs cleanly under git. Point
-`statePath` at a synced or version-controlled folder and the journal follows you
-between machines — the panel watches the file and picks up outside edits, and
-re-reads whenever you open it.
+Keys are sorted and the file is indented, so it diffs cleanly under git. A
+corrupt or truncated file loads as an empty journal rather than taking the shell
+down with it.
 
-A corrupt or truncated file loads as an empty journal rather than taking the
-shell down with it.
+The plugin ships **single-device**: `statePath` is empty, the journal lives in
+the local state directory, and nothing syncs. To use it on more than one
+machine, see below.
+
+## Using it on more than one device
+
+The journal is one JSON file, so any file-sync tool moves it. Point `statePath`
+at a synced folder on each machine and they share one journal:
+
+```bash
+omarchy-shell shell setBarWidget io.github.ipastorsan.bujo \
+  statePath '"/home/YOU/Sync/bujo/tasks.json"' '{}'
+```
+
+Use the same path on every machine, pointed at the same synced directory
+(Syncthing, Dropbox, a git checkout — anything that reproduces the file). Set it
+back to `'""'` to go local again.
+
+**The two devices merge rather than overwrite.** When the file changes
+underneath it, the panel does not adopt the new contents wholesale — it combines
+them with what it already has and, if its own side had anything the file did
+not, writes the result back so the other machine learns about it too. So editing
+on both machines while both are offline does not cost you a task.
+
+What each field does when the two machines disagree:
+
+| | |
+|---|---|
+| A task only one machine has | kept |
+| Finished on either | finished, keeping the earlier completion time |
+| Deleted on either | deleted — this outranks finished |
+| Edited on both | the later edit wins, by `updatedAt` |
+| Migrated on both to the same day | one task, not two |
+| `migrations` count | the higher one |
+| Order within a day | stays local — it is what `J`/`K` control |
+
+Two consequences worth knowing:
+
+- **Deleting is a soft delete.** The entry stays in the file marked `deleted`
+  until it is 30 days old, then it is pruned. Without the marker a merge cannot
+  tell "new over there" from "deleted over here", and every task you deleted on
+  one machine would be resurrected by the other. Deleted tasks never appear in
+  the list, the counts, or the calendar.
+- **Migrating the same task to *different* days on two offline machines leaves a
+  duplicate.** Each machine made its own copy before they met, and a two-way
+  merge with no common ancestor cannot know they are the same work. Migrating to
+  the *same* day — what the backlog banner does, so the overwhelmingly common
+  case — collapses to one task.
+
+### Device identity
+
+Each machine generates four random hex bytes on first run and stores them at:
+
+```
+~/.local/state/omarchy/bujo/device
+```
+
+Task ids embed it (`mtbaqzdk-7d703430-0`). This is what stops two machines that
+add a task in the same millisecond from minting the same id, which under a merge
+would fuse two unrelated tasks into one. The path is fixed and **local on
+purpose** — it must not be inside the synced folder, and `statePath` does not
+move it. If you clone a machine's whole home directory, delete this file on the
+clone so it generates its own.
+
+`omarchy-shell bujo status` reports both the device id and the journal path, and
+is the first thing to check if two machines are not converging.
 
 ## Remove
 

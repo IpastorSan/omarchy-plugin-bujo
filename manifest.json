@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ipastorsan.bujo",
+  "name": "Bujo",
+  "version": "0.1.0",
+  "author": "IpastorSan",
+  "license": "MIT",
+  "description": "A bullet journal in the bar. Tasks belong to a day; migrate what you didn't finish.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Bujo",
+    "description": "Dated task list with a calendar, completion stats, and one-click migration.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "pillMode": "ratio",
+      "weekStartDay": "locale",
+      "dimWhenEmpty": true,
+      "showMigrationMarks": true,
+      "statePath": ""
+    },
+    "schema": [
+      {
+        "key": "pillMode",
+        "type": "enum",
+        "label": "Bar shows",
+        "description": "What the pill displays for today: done/total, tasks left, percent, or the icon alone.",
+        "options": ["ratio", "count", "percent", "icon"],
+        "defaultValue": "ratio"
+      },
+      {
+        "key": "weekStartDay",
+        "type": "enum",
+        "label": "Week starts on",
+        "description": "Leave on locale to follow your system's first day of the week.",
+        "options": ["locale", "monday", "sunday"],
+        "defaultValue": "locale"
+      },
+      {
+        "key": "dimWhenEmpty",
+        "type": "boolean",
+        "label": "Dim the icon when today is empty",
+        "defaultValue": true
+      },
+      {
+        "key": "showMigrationMarks",
+        "type": "boolean",
+        "label": "Mark tasks that have been migrated",
+        "description": "Shows how many times a task has been pushed forward.",
+        "defaultValue": true
+      },
+      {
+        "key": "statePath",
+        "type": "path",
+        "label": "Task file",
+        "description": "Leave empty for ~/.local/state/omarchy/bujo/tasks.json. Point it at a synced folder to carry the journal between machines.",
+        "defaultValue": ""
+      }
+    ]
+  }
+}

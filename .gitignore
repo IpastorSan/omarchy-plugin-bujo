@@ -1,0 +1,9 @@
+# Nothing built here belongs in the repo, and nothing may land in the installed
+# copy either: the shell watches ~/.config/omarchy/plugins with `inotifywait -m
+# -r`, so a stray build or cache directory there is a hot-reload storm.
+node_modules/
+*.log
+.direnv/
+
+# Local scratch
+/preview-src/

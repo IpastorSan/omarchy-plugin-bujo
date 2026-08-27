@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# Bind a key to toggle the bujo panel.
+#
+# This is deliberately NOT run by `omarchy plugin add`. A plugin that rewrites
+# your Hyprland config the moment it is installed is a plugin you cannot trust,
+# and the marketplace asks that plugins not touch user configuration without
+# explicit consent. You run this yourself, or you never run it at all.
+#
+#   bin/setup-keybind                            bind SUPER + SHIFT + J
+#   bin/setup-keybind --key "SUPER + B"          bind something else
+#   bin/setup-keybind --remove                   take the binding back out
+#
+# Omarchy 4 (Quattro) configures Hyprland in Lua, so this edits
+# ~/.config/hypr/bindings.lua. On a pre-4 install that file will not exist and
+# the script tells you the line to add by hand instead.
+set -euo pipefail
+
+BINDINGS="${HOME}/.config/hypr/bindings.lua"
+MARK_BEGIN="-- >>> bujo keybinding >>>"
+MARK_END="-- <<< bujo keybinding <<<"
+KEY="SUPER + SHIFT + J"
+REMOVE=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --key) KEY="${2:?--key needs a value}"; shift 2 ;;
+    --remove) REMOVE=1; shift ;;
+    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+LINE="o.bind(\"${KEY}\", \"Bujo\", \"omarchy-shell bujo toggle\")"
+
+if [ ! -f "$BINDINGS" ]; then
+  echo "No $BINDINGS found." >&2
+  echo "Add this to your Hyprland config by hand:" >&2
+  echo "  $LINE" >&2
+  exit 1
+fi
+
+backup="${BINDINGS}.bak.$(date +%s)"
+cp "$BINDINGS" "$backup"
+
+# Strip any block we wrote before, then re-add. Rewriting in place rather than
+# appending is what makes this safe to run twice.
+tmp=$(mktemp)
+awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+  $0 == b { skip = 1; next }
+  $0 == e { skip = 0; next }
+  !skip   { print }
+' "$BINDINGS" > "$tmp"
+
+if [ "$REMOVE" -eq 0 ]; then
+  {
+    echo "$MARK_BEGIN"
+    echo "$LINE"
+    echo "$MARK_END"
+  } >> "$tmp"
+fi
+
+mv "$tmp" "$BINDINGS"
+
+# A Lua syntax error takes the whole config down, so verify before walking away.
+if ! hyprctl reload >/dev/null 2>&1; then
+  echo "hyprctl reload failed; restoring $BINDINGS from the backup." >&2
+  cp "$backup" "$BINDINGS"
+  hyprctl reload >/dev/null 2>&1 || true
+  exit 1
+fi
+
+if [ "$REMOVE" -eq 1 ]; then
+  echo "Removed the bujo binding. Backup: $backup"
+else
+  echo "Bound ${KEY} to toggle bujo. Backup: $backup"
+fi

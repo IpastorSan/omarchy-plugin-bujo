@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Model.js holds every function that could get a date or a migration
+      # wrong. These are the only tests that can run without a live shell.
+      - name: Unit tests
+        run: node --test
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      # Mirrors omarchy-plugin-validate, so a manifest the shell would reject
+      # never reaches main.
+      - name: Validate manifest
+        run: |
+          jq -e '.schemaVersion == 1' manifest.json
+          jq -e '.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")' manifest.json
+          jq -e '.id | startswith("omarchy.") | not' manifest.json
+          jq -e '.kinds | length > 0' manifest.json
+          jq -e '.barWidget.defaultSection | IN("left","center","right")' manifest.json
+          jq -e '.barWidget.schema | all(.type | IN("string","integer","enum","path","boolean","multiselect"))' manifest.json
+          test -f "$(jq -r '.entryPoints.barWidget' manifest.json)"
+      - name: No symlinks anywhere in the plugin folder
+        run: |
+          found=$(find . -path ./.git -prune -o -type l -print)
+          if [ -n "$found" ]; then echo "symlinks rejected by the validator:"; echo "$found"; exit 1; fi

@@ -9,8 +9,8 @@ jobs:
   model:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       # Model.js holds every function that could get a date or a migration
@@ -21,7 +21,7 @@ jobs:
   plugin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y jq
       # Mirrors omarchy-plugin-validate, so a manifest the shell would reject
       # never reaches main.

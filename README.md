@@ -198,9 +198,24 @@ they race by construction. The open flags are the guarantee. Anything that is
 not a plain regular file is refused, logged, and leaves the in-memory journal
 untouched rather than being guessed at.
 
-Writes go to a private temporary file created exclusively (`O_EXCL`, mode 600)
-and are published with `mv -T`, which replaces a symlink at the destination
-rather than following it. The device id is published with a hard link, so it
+Writes hold **one descriptor** from creation to publication. Creating a
+temporary exclusively and then writing to it *by name* is not enough — the
+exclusivity ends with the create, and the name can be replaced with a symlink or
+a FIFO before the write reopens it. So the temporary is opened once with
+`O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK` at mode 600, every byte goes through that
+same descriptor, and before publishing, the name is confirmed to still refer to
+the file being held. Publication is `rename(2)`, which replaces a symlink at the
+destination rather than following it.
+
+The temporary is never unlinked before it is created — clearing the name first
+is exactly what makes `O_EXCL` meaningless. A stale temporary left by a hard
+kill is swept after an hour instead.
+
+This part is `perl` rather than shell because the shell's `noclobber` only
+guards regular files: a FIFO planted at the temporary name opens and blocks the
+whole shell. `perl` is already an Omarchy dependency, so this adds nothing new.
+
+The device id is created the same way and published with a hard link, so it
 either creates the file or reads what was already there — it never writes
 through something another process put in the way.
 

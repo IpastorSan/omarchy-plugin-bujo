@@ -20,6 +20,16 @@ import "Model.js" as Model
 //   count/bs  — the read is bounded no matter what the file claims to be
 // The stat and -f/-L tests before it are a cheap early bail, not the guarantee;
 // they race by construction. The open flags are the guarantee.
+//
+// Writes hold ONE descriptor from creation to publication. Creating a temp
+// exclusively and then writing to it by name is not enough: the exclusivity
+// ends with the create, and the name can be replaced with a symlink or a FIFO
+// before the write reopens it. So the temp is opened once with
+// O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, every byte goes through that same
+// descriptor, and before publishing we confirm the name still refers to the
+// file we are holding. perl does this rather than the shell because `set -C`
+// only guards regular files — a FIFO planted at the temp name opens and blocks
+// the whole shell — and because it is an Omarchy dependency already.
 Item {
   id: store
 
@@ -110,14 +120,14 @@ Item {
     var text = Model.serialize(pruned)
     if (text === store.lastWritten) return
     store.writing = true
-    writeProc.pending = text
-    // Remembered separately from `pending`, which is cleared the moment stdin
-    // is fed. On success `lastWritten` must become the text this write actually
-    // put on disk — re-serialising the journal at exit records whatever it has
-    // become since, and a task added mid-write is then treated as already
-    // saved and silently never written at all.
-    writeProc.inflight = text
-    writeProc.running = true
+    // `inflight` is kept separate from `payload`, which is cleared the moment
+    // stdin is fed. On success `lastWritten` must become the text this write
+    // actually put on disk — re-serialising the journal at exit records
+    // whatever it has become since, and a task added mid-write is then treated
+    // as already saved and silently never written at all.
+    var writer = writerComponent.createObject(store, { payload: text, inflight: text })
+    if (!writer) { store.writing = false; store.lastError = "Could not start the writer"; return }
+    writer.running = true
   }
 
   Component.onCompleted: {
@@ -180,47 +190,95 @@ Item {
 
   // --- validated atomic write -----------------------------------------------
 
-  Process {
-    id: writeProc
-    running: false
-    property string pending: ""
-    property string inflight: ""
-    stdinEnabled: true
+  // A fresh Process per write, created from a Component and destroyed on exit.
+  //
+  // Not one long-lived Process re-triggered by setting running=true: stdin has
+  // to be closed after the payload so the helper sees EOF, and a Process whose
+  // stdin has been closed does not start again. Reusing one silently performed
+  // exactly one write per session — every later save was dropped with no error,
+  // because onExited never fired to report one.
+  Component {
+    id: writerComponent
 
-    command: ["bash", "-c",
-      'p="$1"; max="$2"; d="${p%/*}"; ' +
-      'mkdir -p -- "$d" || exit 20; ' +
-      '[ -L "$p" ] && exit 11; ' +               // never publish through a symlink
-      'tmp="$d/.bujo.tmp.$$"; ' +
-      'rm -f -- "$tmp"; ' +
-      '( set -C; : > "$tmp" ) || exit 21; ' +    // O_EXCL: refuse a planted temp
-      'chmod 600 -- "$tmp" || exit 22; ' +
-      'head -c "$max" > "$tmp" || { rm -f -- "$tmp"; exit 23; }; ' +
-      // -T so a symlink at the destination is replaced, never followed.
-      'mv -T -- "$tmp" "$p" || { rm -f -- "$tmp"; exit 24; }',
-      "_", store.resolvedPath, String(store.maxBytes)]
+    Process {
+      property string payload: ""
+      property string inflight: ""
+      stdinEnabled: true
 
-    onStarted: {
-      write(writeProc.pending)
-      writeProc.pending = ""
-      stdinEnabled = false
-    }
+    command: ["perl", "-e",
+      [
+      'use strict; use warnings;',
+      'use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK);',
+      'use File::Path qw(make_path);',
+      'my ($dest, $max) = @ARGV;',
+      'my ($dir) = $dest =~ m{^(.*)/[^/]*$};',
+      '$dir = "." unless defined $dir && length $dir;',
+      'make_path($dir) unless -d $dir;',
+      'my $tmp = sprintf("%s/.bujo.tmp.%d", $dir, $$);',
+      // Deliberately NOT unlinked first. Clearing the name before creating it
+      // is what makes O_EXCL meaningless: it removes whatever an attacker put
+      // there and then creates cleanly every time. If the name is occupied the
+      // create must fail, and the sweep below is what keeps that from becoming
+      // permanent after a hard kill.
 
-    onExited: function (code) {
-      store.writing = false
-      if (code === 0) {
-        store.writeCount++
-        store.lastWritten = writeProc.inflight
-        store.lastError = ""
-        // The journal may have moved on while this write was in flight.
-        if (Model.serialize(store.journal) !== store.lastWritten) store.savePending = true
-      } else {
-        store.lastError = code === 11
-          ? "Refused to write: " + store.resolvedPath + " is a symlink"
-          : "Could not write " + store.resolvedPath + " (" + code + ")"
-        console.warn("bujo: " + store.lastError)
+      // Every failure path below unlinks its own temp, so this only sweeps up
+      // after a hard kill mid-write. unlink never follows a symlink, so a
+      // planted name here removes the link and not whatever it points at.
+      'for my $old (glob("$dir/.bujo.tmp.*")) {',
+      '  my @o = lstat($old);',
+      '  unlink $old if @o && -f _ && time - $o[9] > 3600;',
+      '}',
+      // One open, with the flags that matter. O_EXCL refuses anything already
+      // at the name, O_NOFOLLOW refuses a symlink, O_NONBLOCK means a planted
+      // FIFO cannot wedge the shell.
+      'sysopen(my $fh, $tmp, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, 0600) or exit 21;',
+      'my ($buf, $n) = ("", 0);',
+      'while (my $r = sysread(STDIN, $buf, 65536)) {',
+      '  $n += $r;',
+      '  if ($n > $max) { close $fh; unlink $tmp; exit 23 }',
+      '  my $o = 0;',
+      '  while ($o < $r) {',
+      '    my $w = syswrite($fh, $buf, $r - $o, $o);',
+      '    unless (defined $w) { close $fh; unlink $tmp; exit 23 }',
+      '    $o += $w;',
+      '  }',
+      '}',
+      'eval { require IO::Handle; $fh->sync };',
+      // Validation before publication: the name must still be the file this
+      // descriptor points at, or someone swapped it while we were writing.
+      'my @f = stat($fh); my @l = lstat($tmp);',
+      'unless (@l && $f[0] == $l[0] && $f[1] == $l[1]) { close $fh; unlink $tmp; exit 25 }',
+      'close($fh) or do { unlink $tmp; exit 23 };',
+      // rename(2) replaces a symlink at the destination rather than following it.
+      'rename($tmp, $dest) or do { unlink $tmp; exit 24 };',
+      'exit 0'
+      ].join("\n"),
+      "--", store.resolvedPath, String(store.maxBytes)]
+
+      onStarted: {
+        write(payload)
+        payload = ""
+        // Closing stdin is what gives the helper its EOF.
+        stdinEnabled = false
       }
-      if (store.savePending) { store.savePending = false; saveTimer.restart() }
+
+      onExited: function (code) {
+        store.writing = false
+        if (code === 0) {
+          store.writeCount++
+          store.lastWritten = inflight
+          store.lastError = ""
+          // The journal may have moved on while this write was in flight.
+          if (Model.serialize(store.journal) !== store.lastWritten) store.savePending = true
+        } else {
+          store.lastError = code === 21 ? "Refused to write: the temporary file could not be created exclusively"
+                          : code === 25 ? "Refused to publish: the temporary file was replaced mid-write"
+                          : "Could not write " + store.resolvedPath + " (" + code + ")"
+          console.warn("bujo: " + store.lastError)
+        }
+        if (store.savePending) { store.savePending = false; saveTimer.restart() }
+        destroy()
+      }
     }
   }
 
@@ -261,24 +319,44 @@ Item {
   Process {
     id: deviceProc
     running: false
-    command: ["bash", "-c",
-      'p="$1"; d="${p%/*}"; ' +
-      'mkdir -p -- "$d" || exit 20; ' +
-      'if [ ! -e "$p" ]; then ' +
-      '  tmp="$d/.device.tmp.$$"; ' +
-      '  rm -f -- "$tmp"; ' +
-      '  ( set -C; : > "$tmp" ) || exit 21; ' +
-      '  chmod 600 -- "$tmp"; ' +
-      '  od -An -N4 -tx1 /dev/urandom | tr -d " \\n" > "$tmp" || { rm -f -- "$tmp"; exit 23; }; ' +
-      '  ln -- "$tmp" "$p" 2>/dev/null; ' +      // exclusive publish; losing a race is fine
-      '  rm -f -- "$tmp"; ' +
-      'fi; ' +
-      '[ -L "$p" ] && exit 11; ' +
-      '[ -f "$p" ] || exit 12; ' +
-      'sz=$(stat -c %s -- "$p" 2>/dev/null || echo 0); ' +
-      '[ "$sz" -le 64 ] || exit 13; ' +
-      'exec dd if="$p" iflag=nofollow,nonblock bs=64 count=1 status=none',
-      "_", store.devicePath]
+    command: ["perl", "-e",
+      [
+      'use strict; use warnings;',
+      'use Fcntl qw(O_RDONLY O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK :mode);',
+      'use File::Path qw(make_path);',
+      'my ($dest) = @ARGV;',
+      'my ($dir) = $dest =~ m{^(.*)/[^/]*$};',
+      '$dir = "." unless defined $dir && length $dir;',
+      'make_path($dir) unless -d $dir;',
+      'unless (-e $dest) {',
+      '  my $tmp = sprintf("%s/.device.tmp.%d", $dir, $$);',
+      // Same single-descriptor discipline as the journal write.
+      '  if (sysopen(my $fh, $tmp, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, 0600)) {',
+      '    my $rnd = "";',
+      '    if (sysopen(my $u, "/dev/urandom", O_RDONLY)) { sysread($u, $rnd, 4); close $u }',
+      '    my $hex = unpack("H*", $rnd);',
+      '    if (length($hex) == 8 && defined syswrite($fh, $hex)) {',
+      '      eval { require IO::Handle; $fh->sync };',
+      '      my @f = stat($fh); my @l = lstat($tmp);',
+      '      if (@l && $f[0] == $l[0] && $f[1] == $l[1]) {',
+      '        close $fh;',
+      // link() publishes exclusively: it fails if anything already holds the
+      // name, so a racing creator wins and we simply read theirs.
+      '        link($tmp, $dest);',
+      '      } else { close $fh }',
+      '    } else { close $fh }',
+      '    unlink $tmp;',
+      '  }',
+      '}',
+      // Read back through a validated descriptor, same rules as the journal.
+      'sysopen(my $rh, $dest, O_RDONLY|O_NOFOLLOW|O_NONBLOCK) or exit 11;',
+      'my @st = stat($rh);',
+      'unless (@st && S_ISREG($st[2])) { close $rh; exit 12 }',
+      'if ($st[7] > 64) { close $rh; exit 13 }',
+      'my $out = ""; sysread($rh, $out, 64); close $rh;',
+      'print $out; exit 0'
+      ].join("\n"),
+      "--", store.devicePath]
 
     stdout: StdioCollector {
       waitForEnd: true

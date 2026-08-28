@@ -178,6 +178,34 @@ Keys are sorted and the file is indented, so it diffs cleanly under git. A
 corrupt or truncated file loads as an empty journal rather than taking the shell
 down with it.
 
+### How the files are opened
+
+Both paths are predictable, and the plugin runs inside the long-lived
+`omarchy-shell` process — so a read that blocks takes the whole shell with it.
+Every open is therefore made through a bounded, non-following descriptor:
+
+```
+dd if=<path> iflag=nofollow,nonblock bs=65536 count=<bounded>
+```
+
+- `nofollow` — a symlink fails to open instead of redirecting the read
+- `nonblock` — a FIFO returns immediately instead of blocking forever
+- `count`/`bs` — the read is bounded regardless of what the file claims to be,
+  with a 4 MiB ceiling on the journal
+
+The `-f`/`-L`/size tests before it are a cheap early bail, not the guarantee;
+they race by construction. The open flags are the guarantee. Anything that is
+not a plain regular file is refused, logged, and leaves the in-memory journal
+untouched rather than being guessed at.
+
+Writes go to a private temporary file created exclusively (`O_EXCL`, mode 600)
+and are published with `mv -T`, which replaces a symlink at the destination
+rather than following it. The device id is published with a hard link, so it
+either creates the file or reads what was already there — it never writes
+through something another process put in the way.
+
+The journal and the device id are both mode 600.
+
 The plugin ships **single-device**: `statePath` is empty, the journal lives in
 the local state directory, and nothing syncs. To use it on more than one
 machine, see below.

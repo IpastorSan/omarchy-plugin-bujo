@@ -113,6 +113,7 @@ Item {
         Text {
           Layout.fillWidth: true
           text: deferredRow.modelData.text
+          textFormat: Text.PlainText
           color: view.foreground
           font.family: view.fontFamily
           font.pixelSize: Style.font.bodySmall

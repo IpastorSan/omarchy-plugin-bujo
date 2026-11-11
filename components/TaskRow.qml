@@ -76,6 +76,9 @@ CursorSurface {
       id: label
       Layout.fillWidth: true
       text: row.task ? row.task.text : ""
+      // Task text is data, possibly from another machine through a synced
+      // statePath. AutoText would render `<img src=…>` in it and fetch the URL.
+      textFormat: Text.PlainText
       color: row.foreground
       opacity: row.migrated ? 0.45 : (row.done ? 0.55 : 1.0)
       font.family: row.fontFamily

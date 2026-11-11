@@ -791,3 +791,23 @@ test("merge tolerates a corrupt file on the other side", () => {
   const merged = M.mergeStores(mine, M.normalizeStore('{"days":{"2026-08-27":[{"text"'))
   assert.deepEqual(content(merged), content(mine))
 })
+
+test("ids and roots that name Object.prototype members load and merge like any other", () => {
+  // A plain {} lookup answered these from the prototype: a root of
+  // "constructor" crashed the merge, an id of "toString" was skipped as seen.
+  for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    const file = JSON.stringify({ version: 1, days: {
+      "2026-08-26": [{ id: name, root: name, text: "by id " + name, createdAt: T0, updatedAt: T0 }],
+      "2026-08-27": [
+        { id: "a-" + name, root: name, text: "lineage " + name, createdAt: T0, updatedAt: T0 },
+        { id: "b-" + name, root: name, text: "same lineage " + name, createdAt: T0, updatedAt: T0 }
+      ]
+    } })
+    const loaded = M.normalizeStore(file)
+    const merged = converge(loaded, M.emptyStore())
+    assert.equal(M.tasksFor(merged, "2026-08-26").length, 1, name + ": the task survives")
+    assert.equal(M.tasksFor(merged, "2026-08-26")[0].id, name)
+    // Three live copies of one root collapse to the earliest, like any root.
+    assert.equal(M.tasksFor(merged, "2026-08-27").length, 0, name + ": the lineage collapses")
+  }
+})

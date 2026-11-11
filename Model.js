@@ -167,6 +167,13 @@ function monthGrid(year, month, weekStart, todayKey) {
 var SCHEMA_VERSION = 1
 var MAX_TEXT = 500
 
+// A lookup table keyed by ids and roots read from the file. A plain {} would
+// answer "constructor" or "__proto__" from Object.prototype, so a task named
+// that would be skipped as already seen, or crash a merge pushing onto it.
+function dict() {
+  return Object.create(null)
+}
+
 function emptyStore() {
   return { version: SCHEMA_VERSION, days: {} }
 }
@@ -247,7 +254,7 @@ function normalizeStore(raw) {
   if (!days || typeof days !== "object" || Array.isArray(days)) return emptyStore()
 
   var out = emptyStore()
-  var seen = {}
+  var seen = dict()
   for (var key in days) {
     if (!Object.prototype.hasOwnProperty.call(days, key)) continue
     if (!isKey(key)) continue
@@ -325,7 +332,7 @@ function tasksFor(store, key) {
 }
 
 function allIds(store) {
-  var used = {}
+  var used = dict()
   var days = (store && store.days) || {}
   for (var key in days) {
     if (!Object.prototype.hasOwnProperty.call(days, key)) continue
@@ -674,7 +681,7 @@ function mergeTask(local, remote) {
 // machine silently rearranging the other's list every time they meet.
 function mergeStores(local, remote) {
   var out = { version: SCHEMA_VERSION, days: {} }
-  var keys = {}
+  var keys = dict()
   var k
   for (k in ((local && local.days) || {})) keys[k] = true
   for (k in ((remote && remote.days) || {})) keys[k] = true
@@ -683,7 +690,7 @@ function mergeStores(local, remote) {
   // which — a hand edit, or a sync tool reviving an older copy — and unioning
   // per day would then place the same id under both, which every later pass
   // reads as two tasks. Settle it once, earliest day wins.
-  var dayOf = {}
+  var dayOf = dict()
   var side, sk, sl, si, sid
   for (var pass = 0; pass < 2; pass++) {
     side = (pass === 0 ? local : remote)
@@ -702,11 +709,11 @@ function mergeStores(local, remote) {
     var l = rawTasksFor(local, day)
     var r = rawTasksFor(remote, day)
 
-    var byId = {}
+    var byId = dict()
     for (var i = 0; i < r.length; i++) byId[r[i].id] = r[i]
 
     var merged = []
-    var seen = {}
+    var seen = dict()
     for (var j = 0; j < l.length; j++) {
       var lt = l[j]
       if (seen[lt.id] || dayOf[lt.id] !== day) continue
@@ -742,7 +749,7 @@ function collapseLineages(store) {
 
   // Gather the live copies of each root. Migrated and deleted entries are
   // history and never collapse.
-  var byRoot = {}
+  var byRoot = dict()
   var day, i, list, task, key
   for (day in days) {
     if (!Object.prototype.hasOwnProperty.call(days, day)) continue
@@ -756,8 +763,8 @@ function collapseLineages(store) {
     }
   }
 
-  var winners = {}
-  var losers = {}
+  var winners = dict()
+  var losers = dict()
   var found = false
   for (key in byRoot) {
     var group = byRoot[key]

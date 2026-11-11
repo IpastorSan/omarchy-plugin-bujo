@@ -30,6 +30,12 @@ import "Model.js" as Model
 // file we are holding. perl does this rather than the shell because `set -C`
 // only guards regular files — a FIFO planted at the temp name opens and blocks
 // the whole shell — and because it is an Omarchy dependency already.
+//
+// Every helper settles through ONE function that runs once per run, called
+// from both `exited` and `runningChanged`. Quickshell emits only
+// `runningChanged` when a command fails to start, so state settled in
+// onExited alone stays stuck: a writer that never launched leaves `writing`
+// set and no save ever runs again. A watchdog settles any helper that hangs.
 Item {
   id: store
 
@@ -76,6 +82,10 @@ Item {
   property int changeCount: 0
   property int writeCount: 0
 
+  // Far longer than any of these helpers takes on a healthy disk; reaching it
+  // means a hung filesystem, and the helper is killed and settled as failed.
+  readonly property int helperTimeout: 15000
+
   function nowIso() { return new Date().toISOString() }
 
   function commit(next) {
@@ -87,7 +97,9 @@ Item {
 
   function reloadNow() {
     if (readProc.running) return
+    store.readSettled = false
     readProc.running = true
+    readWatchdog.restart()
   }
 
   function applyText(text) {
@@ -127,14 +139,21 @@ Item {
     // as already saved and silently never written at all.
     var writer = writerComponent.createObject(store, { payload: text, inflight: text })
     if (!writer) { store.writing = false; store.lastError = "Could not start the writer"; return }
-    writer.running = true
+    writer.start()
   }
 
   Component.onCompleted: {
     deviceProc.running = true
-    readProc.running = true
+    deviceWatchdog.restart()
+    store.reloadNow()
   }
-  Component.onDestruction: saveTimer.stop()
+  Component.onDestruction: {
+    saveTimer.stop()
+    watchRetry.stop()
+    readWatchdog.stop()
+    readRetry.stop()
+    deviceWatchdog.stop()
+  }
 
   // Coalesces a burst of toggles into one write.
   Timer {
@@ -162,30 +181,71 @@ Item {
 
     stdout: StdioCollector { waitForEnd: true }
 
-    onExited: function (code) {
-      store.loadCount++
-      if (code === 0) {
-        store.lastError = ""
-        store.applyText(stdout.text)
-        return
-      }
-      // No file yet is the normal first run, not a failure.
-      if (code === 10) {
-        store.lastError = ""
-        store.ready = true
-        store.changed()
-        return
-      }
-      // Anything else means the path is not a plain file we are willing to
-      // read. Refuse it and keep whatever is in memory rather than guessing.
-      store.ready = true
-      store.lastError = code === 11 ? "Refused: " + store.resolvedPath + " is a symlink"
-                     : code === 12 ? "Refused: " + store.resolvedPath + " is not a regular file"
-                     : code === 13 ? "Refused: " + store.resolvedPath + " is larger than 4 MiB"
-                     : "Could not read " + store.resolvedPath
-      console.warn("bujo: " + store.lastError)
-      store.changed()
+    onExited: function (code) { store.readFinished(code, stdout.text) }
+    onRunningChanged: if (!running) store.readFinished(-1, "")
+  }
+
+  property bool readSettled: true
+  property int readDelay: 2000
+
+  Timer {
+    id: readWatchdog
+    interval: store.helperTimeout
+    onTriggered: {
+      if (store.readSettled) return
+      readProc.signal(9)
+      store.readFinished(-2, "")
     }
+  }
+
+  // Retries a read that never ran or never finished. Marking the store ready
+  // instead would let the next save write the in-memory journal -- empty, on
+  // the first read -- over a file that may be perfectly fine.
+  Timer {
+    id: readRetry
+    interval: 2000
+    onTriggered: store.reloadNow()
+  }
+
+  // code -1: the helper never started; -2: it hung and was killed.
+  function readFinished(code, text) {
+    if (store.readSettled) return
+    store.readSettled = true
+    readWatchdog.stop()
+    store.loadCount++
+    if (code === -1 || code === -2) {
+      store.lastError = (code === -1 ? "Could not start the reader for " : "Timed out reading ")
+                      + store.resolvedPath
+      console.warn("bujo: " + store.lastError)
+      // Interval set before the restart: changing it on a running Timer
+      // restarts it with the new value.
+      readRetry.interval = store.readDelay
+      readRetry.restart()
+      store.readDelay = Math.min(store.readDelay * 2, 60000)
+      return
+    }
+    store.readDelay = 2000
+    if (code === 0) {
+      store.lastError = ""
+      store.applyText(text)
+      return
+    }
+    // No file yet is the normal first run, not a failure.
+    if (code === 10) {
+      store.lastError = ""
+      store.ready = true
+      store.changed()
+      return
+    }
+    // Anything else means the path is not a plain file we are willing to
+    // read. Refuse it and keep whatever is in memory rather than guessing.
+    store.ready = true
+    store.lastError = code === 11 ? "Refused: " + store.resolvedPath + " is a symlink"
+                   : code === 12 ? "Refused: " + store.resolvedPath + " is not a regular file"
+                   : code === 13 ? "Refused: " + store.resolvedPath + " is larger than 4 MiB"
+                   : "Could not read " + store.resolvedPath
+    console.warn("bujo: " + store.lastError)
+    store.changed()
   }
 
   // --- validated atomic write -----------------------------------------------
@@ -197,87 +257,125 @@ Item {
   // stdin has been closed does not start again. Reusing one silently performed
   // exactly one write per session — every later save was dropped with no error,
   // because onExited never fired to report one.
+  //
+  // The Item around it carries the watchdog and the settle-once flag, which a
+  // Process cannot hold as children.
   Component {
     id: writerComponent
 
-    Process {
+    Item {
+      id: job
       property string payload: ""
       property string inflight: ""
-      stdinEnabled: true
+      property bool settled: false
 
-    command: ["perl", "-e",
-      [
-      'use strict; use warnings;',
-      'use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK);',
-      'use File::Path qw(make_path);',
-      'my ($dest, $max) = @ARGV;',
-      'my ($dir) = $dest =~ m{^(.*)/[^/]*$};',
-      '$dir = "." unless defined $dir && length $dir;',
-      'make_path($dir) unless -d $dir;',
-      'my $tmp = sprintf("%s/.bujo.tmp.%d", $dir, $$);',
-      // Deliberately NOT unlinked first. Clearing the name before creating it
-      // is what makes O_EXCL meaningless: it removes whatever an attacker put
-      // there and then creates cleanly every time. If the name is occupied the
-      // create must fail, and the sweep below is what keeps that from becoming
-      // permanent after a hard kill.
-
-      // Every failure path below unlinks its own temp, so this only sweeps up
-      // after a hard kill mid-write. unlink never follows a symlink, so a
-      // planted name here removes the link and not whatever it points at.
-      'for my $old (glob("$dir/.bujo.tmp.*")) {',
-      '  my @o = lstat($old);',
-      '  unlink $old if @o && -f _ && time - $o[9] > 3600;',
-      '}',
-      // One open, with the flags that matter. O_EXCL refuses anything already
-      // at the name, O_NOFOLLOW refuses a symlink, O_NONBLOCK means a planted
-      // FIFO cannot wedge the shell.
-      'sysopen(my $fh, $tmp, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, 0600) or exit 21;',
-      'my ($buf, $n) = ("", 0);',
-      'while (my $r = sysread(STDIN, $buf, 65536)) {',
-      '  $n += $r;',
-      '  if ($n > $max) { close $fh; unlink $tmp; exit 23 }',
-      '  my $o = 0;',
-      '  while ($o < $r) {',
-      '    my $w = syswrite($fh, $buf, $r - $o, $o);',
-      '    unless (defined $w) { close $fh; unlink $tmp; exit 23 }',
-      '    $o += $w;',
-      '  }',
-      '}',
-      'eval { require IO::Handle; $fh->sync };',
-      // Validation before publication: the name must still be the file this
-      // descriptor points at, or someone swapped it while we were writing.
-      'my @f = stat($fh); my @l = lstat($tmp);',
-      'unless (@l && $f[0] == $l[0] && $f[1] == $l[1]) { close $fh; unlink $tmp; exit 25 }',
-      'close($fh) or do { unlink $tmp; exit 23 };',
-      // rename(2) replaces a symlink at the destination rather than following it.
-      'rename($tmp, $dest) or do { unlink $tmp; exit 24 };',
-      'exit 0'
-      ].join("\n"),
-      "--", store.resolvedPath, String(store.maxBytes)]
-
-      onStarted: {
-        write(payload)
-        payload = ""
-        // Closing stdin is what gives the helper its EOF.
-        stdinEnabled = false
+      function start() {
+        writerProc.running = true
+        writerWatchdog.restart()
       }
 
-      onExited: function (code) {
+      // code -1: the helper never started; -2: it hung and was killed.
+      function finished(code) {
+        if (job.settled) return
+        job.settled = true
+        writerWatchdog.stop()
         store.writing = false
         if (code === 0) {
           store.writeCount++
-          store.lastWritten = inflight
+          store.lastWritten = job.inflight
           store.lastError = ""
           // The journal may have moved on while this write was in flight.
           if (Model.serialize(store.journal) !== store.lastWritten) store.savePending = true
         } else {
           store.lastError = code === 21 ? "Refused to write: the temporary file could not be created exclusively"
                           : code === 25 ? "Refused to publish: the temporary file was replaced mid-write"
+                          : code === -1 ? "Could not start the writer for " + store.resolvedPath
+                          : code === -2 ? "Timed out writing " + store.resolvedPath
                           : "Could not write " + store.resolvedPath + " (" + code + ")"
           console.warn("bujo: " + store.lastError)
+          // Unsaved changes stay in memory; the next commit retries them.
         }
         if (store.savePending) { store.savePending = false; saveTimer.restart() }
-        destroy()
+      }
+
+      Timer {
+        id: writerWatchdog
+        interval: store.helperTimeout
+        onTriggered: {
+          writerProc.signal(9)
+          job.finished(-2)
+        }
+      }
+
+      Process {
+        id: writerProc
+        stdinEnabled: true
+
+      command: ["perl", "-e",
+        [
+        'use strict; use warnings;',
+        'use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK);',
+        'use File::Path qw(make_path);',
+        'my ($dest, $max) = @ARGV;',
+        'my ($dir) = $dest =~ m{^(.*)/[^/]*$};',
+        '$dir = "." unless defined $dir && length $dir;',
+        'make_path($dir) unless -d $dir;',
+        'my $tmp = sprintf("%s/.bujo.tmp.%d", $dir, $$);',
+        // Deliberately NOT unlinked first. Clearing the name before creating it
+        // is what makes O_EXCL meaningless: it removes whatever an attacker put
+        // there and then creates cleanly every time. If the name is occupied the
+        // create must fail, and the sweep below is what keeps that from becoming
+        // permanent after a hard kill.
+
+        // Every failure path below unlinks its own temp, so this only sweeps up
+        // after a hard kill mid-write. unlink never follows a symlink, so a
+        // planted name here removes the link and not whatever it points at.
+        'for my $old (glob("$dir/.bujo.tmp.*")) {',
+        '  my @o = lstat($old);',
+        '  unlink $old if @o && -f _ && time - $o[9] > 3600;',
+        '}',
+        // One open, with the flags that matter. O_EXCL refuses anything already
+        // at the name, O_NOFOLLOW refuses a symlink, O_NONBLOCK means a planted
+        // FIFO cannot wedge the shell.
+        'sysopen(my $fh, $tmp, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, 0600) or exit 21;',
+        'my ($buf, $n) = ("", 0);',
+        'while (my $r = sysread(STDIN, $buf, 65536)) {',
+        '  $n += $r;',
+        '  if ($n > $max) { close $fh; unlink $tmp; exit 23 }',
+        '  my $o = 0;',
+        '  while ($o < $r) {',
+        '    my $w = syswrite($fh, $buf, $r - $o, $o);',
+        '    unless (defined $w) { close $fh; unlink $tmp; exit 23 }',
+        '    $o += $w;',
+        '  }',
+        '}',
+        'eval { require IO::Handle; $fh->sync };',
+        // Validation before publication: the name must still be the file this
+        // descriptor points at, or someone swapped it while we were writing.
+        'my @f = stat($fh); my @l = lstat($tmp);',
+        'unless (@l && $f[0] == $l[0] && $f[1] == $l[1]) { close $fh; unlink $tmp; exit 25 }',
+        'close($fh) or do { unlink $tmp; exit 23 };',
+        // rename(2) replaces a symlink at the destination rather than following it.
+        'rename($tmp, $dest) or do { unlink $tmp; exit 24 };',
+        'exit 0'
+        ].join("\n"),
+        "--", store.resolvedPath, String(store.maxBytes)]
+
+        onStarted: {
+          write(job.payload)
+          job.payload = ""
+          // Closing stdin is what gives the helper its EOF.
+          stdinEnabled = false
+        }
+
+        onExited: function (code) { job.finished(code) }
+        // Fires after `exited`, and alone when the command never started. The
+        // job outlives a killed helper until it has actually gone.
+        onRunningChanged: {
+          if (running) return
+          job.finished(-1)
+          job.destroy()
+        }
       }
     }
   }
@@ -286,19 +384,21 @@ Item {
   //
   // The directory, not the file: an atomic write replaces the file by rename,
   // which a watch on the old inode would stop seeing after the first save.
+  //
+  // inotifywait is the tracked process itself, with no shell around it. A
+  // retry loop in bash made it a grandchild, and Quickshell kills only the
+  // process it started: disabling or reloading the plugin left the watcher
+  // running. The retry lives in QML instead.
   Process {
     id: watchProc
     running: true
-    command: ["bash", "-c",
-      'd="$1"; ' +
-      'while true; do ' +
-      '  if [ -d "$d" ]; then ' +
-      '    inotifywait -m -q -e close_write,create,moved_to,delete ' +
-      '      --format "%f" -- "$d" 2>/dev/null; ' +
-      '  fi; ' +
-      '  sleep 2; ' +                            // directory absent, or watcher died
-      'done',
-      "_", store.resolvedDir]
+    command: ["inotifywait", "-m", "-q", "-e", "close_write,create,moved_to,delete",
+              "--format", "%f", "--", store.resolvedDir]
+
+    // Directory absent, inotifywait missing, or the watch died: try again,
+    // backing off so a missing binary is not retried every two seconds forever.
+    onStarted: watchRetry.interval = 2000
+    onRunningChanged: if (!running) watchRetry.restart()
 
     stdout: SplitParser {
       splitMarker: "\n"
@@ -307,6 +407,15 @@ Item {
         store.changeCount++
         store.reloadNow()
       }
+    }
+  }
+
+  Timer {
+    id: watchRetry
+    interval: 2000
+    onTriggered: {
+      watchProc.running = true
+      watchRetry.interval = Math.min(watchRetry.interval * 2, 60000)
     }
   }
 
@@ -366,15 +475,34 @@ Item {
       }
     }
 
-    onExited: {
-      // Anything that leaves us without an id — an occupied path, no
-      // /dev/urandom, a read-only state directory — falls back rather than
-      // staying empty. A queued task that never lands is worse than an id
-      // derived from the clock, and it stays distinct per install.
-      if (!store.deviceId) {
-        store.lastError = "Could not read " + store.devicePath
-        store.deviceId = "t" + Math.floor(Date.now()).toString(36).slice(-7)
-      }
+    onExited: store.deviceFinished()
+    // Alone, without `exited`, when perl never started.
+    onRunningChanged: if (!running) store.deviceFinished()
+  }
+
+  Timer {
+    id: deviceWatchdog
+    interval: store.helperTimeout
+    onTriggered: {
+      deviceProc.signal(9)
+      store.deviceFinished()
+    }
+  }
+
+  property bool deviceSettled: false
+
+  function deviceFinished() {
+    if (store.deviceSettled) return
+    store.deviceSettled = true
+    deviceWatchdog.stop()
+    // Anything that leaves us without an id — an occupied path, no
+    // /dev/urandom, a read-only state directory, a helper that never started
+    // or hung — falls back rather than staying empty. A queued task that never
+    // lands is worse than an id derived from the clock, and it stays distinct
+    // per install.
+    if (!store.deviceId) {
+      store.lastError = "Could not read " + store.devicePath
+      store.deviceId = "t" + Math.floor(Date.now()).toString(36).slice(-7)
     }
   }
 }

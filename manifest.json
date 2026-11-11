@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ipastorsan.bujo",
   "name": "Bujo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "IpastorSan",
   "license": "MIT",
   "description": "A bullet journal in the bar. Tasks belong to a day; migrate what you didn't finish.",

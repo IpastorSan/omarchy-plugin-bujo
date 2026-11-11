@@ -211,6 +211,9 @@ function normalizeTask(raw, dayKey) {
     done: raw.done === true,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "",
     doneAt: typeof raw.doneAt === "string" ? raw.doneAt : null,
+    // Last time a person ticked or unticked this task. The merge settles `done`
+    // by it, so an untick on one device beats a stale tick on another.
+    toggledAt: typeof raw.toggledAt === "string" ? raw.toggledAt : null,
     origin: origin,
     migrations: Math.floor(migrations),
     // Set on the entry left behind when a task is migrated forward: the day it
@@ -389,6 +392,7 @@ function addTask(store, key, text, nowIso, deviceId) {
     done: false,
     createdAt: String(nowIso || ""),
     doneAt: null,
+    toggledAt: null,
     origin: key,
     migrations: 0,
     migratedTo: null,
@@ -414,6 +418,7 @@ function toggleTask(store, key, id, nowIso) {
     for (var k in task) copy[k] = task[k]
     copy.done = done
     copy.doneAt = done ? String(nowIso || "") : null
+    copy.toggledAt = String(nowIso || "")
     copy.updatedAt = String(nowIso || "")
     return copy
   })
@@ -586,6 +591,10 @@ function laterStamp(a, b) {
   return x >= y ? x : y
 }
 
+function toggleStamp(task) {
+  return laterStamp(task.toggledAt, task.doneAt)
+}
+
 function mergeTask(local, remote) {
   if (!local) return remote
   if (!remote) return local
@@ -606,10 +615,23 @@ function mergeTask(local, remote) {
   out.deleted = local.deleted === true || remote.deleted === true
   out.deletedAt = out.deleted ? earlierStamp(local.deletedAt, remote.deletedAt) : null
 
-  // Finishing is monotonic: a task done on either machine is done. The first
-  // completion is the true one, so the earlier stamp survives.
-  out.done = local.done === true || remote.done === true
-  out.doneAt = out.done ? earlierStamp(local.doneAt, remote.doneAt) : null
+  // Finishing is settled by the later tick or untick. It used to be monotonic
+  // — done on either machine meant done — but a bar widget runs one store per
+  // monitor, so every untick was merged straight back into a tick by a sibling
+  // that still remembered it. Journals written before toggledAt existed only
+  // have doneAt, which is the stamp of their last tick.
+  var lt = toggleStamp(local), rt = toggleStamp(remote)
+  if (lt === rt) {
+    // Neither side toggled since they last agreed, or both did in the same
+    // millisecond: done wins, and the first completion is the true one.
+    out.done = local.done === true || remote.done === true
+    out.doneAt = out.done ? earlierStamp(local.done ? local.doneAt : null, remote.done ? remote.doneAt : null) : null
+  } else {
+    var toggled = lt > rt ? local : remote
+    out.done = toggled.done === true
+    out.doneAt = out.done ? (toggled.doneAt || null) : null
+  }
+  out.toggledAt = laterStamp(lt, rt) || null
 
   // So is migrating. If both machines migrated it, the first one decided where
   // it went; the target key breaks a stamp tie so the choice is deterministic

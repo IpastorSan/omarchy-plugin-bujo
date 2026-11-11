@@ -24,6 +24,7 @@ vm.runInContext(source, M)
 const T0 = "2026-08-25T09:00:00.000Z"
 const T1 = "2026-08-26T09:00:00.000Z"
 const T2 = "2026-08-27T09:00:00.000Z"
+const T3 = "2026-08-28T09:00:00.000Z"
 
 // Build a store by replaying real mutations, so the fixtures exercise the same
 // code path the UI does rather than hand-rolling a shape that could drift.
@@ -594,6 +595,39 @@ test("finishing on one device wins, and keeps the earlier completion time", () =
   const task = M.tasksFor(merged, "2026-08-27")[0]
   assert.equal(task.done, true)
   assert.equal(task.doneAt, T1)
+})
+
+test("unticking beats a sibling that still remembers the tick", () => {
+  // The bug: one store per monitor, and a monotonic `done` meant the store
+  // that had not seen the untick merged it straight back into a tick.
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "ticked by mistake", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const ticked = M.toggleTask(base, "2026-08-27", id, T1)
+  const unticked = M.toggleTask(ticked, "2026-08-27", id, T2)
+  const task = M.tasksFor(converge(unticked, ticked), "2026-08-27")[0]
+  assert.equal(task.done, false)
+  assert.equal(task.doneAt, null)
+})
+
+test("ticking again after an untick wins over the untick", () => {
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "x", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const unticked = M.toggleTask(M.toggleTask(base, "2026-08-27", id, T1), "2026-08-27", id, T2)
+  const retick = M.toggleTask(unticked, "2026-08-27", id, T3)
+  const task = M.tasksFor(converge(retick, unticked), "2026-08-27")[0]
+  assert.equal(task.done, true)
+  assert.equal(task.doneAt, T3)
+})
+
+test("an untick beats a tick from a journal written before toggledAt", () => {
+  const base = M.addTask(M.emptyStore(), "2026-08-27", "x", T0, "aaaa")
+  const id = M.tasksFor(base, "2026-08-27")[0].id
+  const ticked = M.toggleTask(base, "2026-08-27", id, T1)
+  const legacy = JSON.parse(JSON.stringify(ticked))
+  delete legacy.days["2026-08-27"][0].toggledAt
+  const unticked = M.toggleTask(ticked, "2026-08-27", id, T2)
+  const task = M.tasksFor(converge(unticked, M.normalizeStore(JSON.stringify(legacy))), "2026-08-27")[0]
+  assert.equal(task.done, false)
 })
 
 test("deleting on one device propagates instead of being resurrected", () => {

@@ -20,6 +20,7 @@ Item {
   property int cursor: 0
   property bool cursorActive: false
   property string editingId: ""
+  property string expandedId: ""
 
   readonly property color foreground: panel && panel.bar ? panel.bar.foreground : Color.foreground
   readonly property color urgent: panel && panel.bar ? panel.bar.urgent : Color.urgent
@@ -48,7 +49,7 @@ Item {
     panel.requestQuickAdd.connect(view.beginAdd)
     Qt.callLater(view.clampCursor)
   }
-  onDayKeyChanged: { view.cursor = 0; view.cursorActive = false; view.endEdit() }
+  onDayKeyChanged: { view.cursor = 0; view.cursorActive = false; view.expandedId = ""; view.endEdit() }
 
   function clampCursor() {
     if (view.cursor >= view.tasks.length) view.cursor = Math.max(0, view.tasks.length - 1)
@@ -93,9 +94,14 @@ Item {
     Qt.callLater(view.clampCursor)
   }
 
+  function toggleExpanded(id) {
+    view.expandedId = view.expandedId === id ? "" : id
+  }
+
   function textKey(t) {
     var task = view.selected()
     if (t === "e" && task && !task.migratedTo) { view.editingId = task.id; view.editing = true }
+    else if (t === "o" && task) view.toggleExpanded(task.id)
     else if (t === "J" && task) { panel.moveTask(task.id, 1); view.cursor = Math.min(view.tasks.length - 1, view.cursor + 1) }
     else if (t === "K" && task) { panel.moveTask(task.id, -1); view.cursor = Math.max(0, view.cursor - 1) }
   }
@@ -291,6 +297,8 @@ Item {
               onHovered: { view.cursorActive = true; view.cursor = slot.index }
               onToggled: if (view.panel) view.panel.toggleTask(slot.modelData.id)
               onEditRequested: { view.editingId = slot.modelData.id; view.editing = true }
+              expanded: view.expandedId === slot.modelData.id
+              onExpandRequested: view.toggleExpanded(slot.modelData.id)
             }
 
             // Inline rename, in place, so the list never jumps.
@@ -387,7 +395,7 @@ Item {
     Text {
       Layout.fillWidth: true
       visible: view.panel ? view.panel.showHelp : false
-      text: "j/k move · space done · e edit · x delete · J/K reorder\n"
+      text: "j/k move · space done · o open · e edit · x delete · J/K reorder\n"
           + "h/l day · g today · m month · s summary · c migrate · a add"
       color: view.dim
       font.family: view.fontFamily

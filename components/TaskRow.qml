@@ -16,14 +16,21 @@ CursorSurface {
   property int rowIndex: 0
   property bool showMigrationMarks: true
   property string fontFamily: Style.font.family
+  // Held by the view, not here: the Repeater rebuilds every row whenever the
+  // journal changes, so state kept on the row would collapse on each tick.
+  property bool expanded: false
 
   readonly property bool done: task ? task.done === true : false
   readonly property bool migrated: task ? !!task.migratedTo : false
   readonly property int migrations: task ? Number(task.migrations) || 0 : 0
+  // A note too long for one line opens on a click on its text. The box still
+  // ticks it; short notes tick from anywhere on the row, as they always did.
+  readonly property bool expandable: label.truncated || row.expanded
 
   signal toggled()
   signal hovered()
   signal editRequested()
+  signal expandRequested()
 
   implicitHeight: content.implicitHeight + Style.spacing.rowPaddingX
   foreground: Color.foreground
@@ -35,12 +42,15 @@ CursorSurface {
     anchors.fill: parent
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.RightButton
-    cursorShape: row.migrated ? Qt.ArrowCursor : Qt.PointingHandCursor
+    cursorShape: row.migrated && !row.expandable ? Qt.ArrowCursor : Qt.PointingHandCursor
     onEntered: row.hovered()
     onClicked: function (mouse) {
-      if (row.migrated) return
-      if (mouse.button === Qt.RightButton) row.editRequested()
-      else row.toggled()
+      if (mouse.button === Qt.RightButton) {
+        if (!row.migrated) row.editRequested()
+        return
+      }
+      if (row.expandable && mouse.x - content.x >= label.x) row.expandRequested()
+      else if (!row.migrated) row.toggled()
     }
   }
 
@@ -59,10 +69,11 @@ CursorSurface {
       opacity: row.migrated ? 0.45 : (row.done ? 0.65 : 1.0)
       font.family: row.fontFamily
       font.pixelSize: Style.font.icon
-      Layout.alignment: Qt.AlignVCenter
+      Layout.alignment: row.expanded ? Qt.AlignTop : Qt.AlignVCenter
     }
 
     Text {
+      id: label
       Layout.fillWidth: true
       text: row.task ? row.task.text : ""
       color: row.foreground
@@ -71,7 +82,8 @@ CursorSurface {
       font.pixelSize: Style.font.body
       font.strikeout: row.done
       font.italic: row.migrated
-      elide: Text.ElideRight
+      elide: row.expanded ? Text.ElideNone : Text.ElideRight
+      wrapMode: row.expanded ? Text.Wrap : Text.NoWrap
     }
 
     // How many times this has been pushed forward. Two is a nudge; five is the

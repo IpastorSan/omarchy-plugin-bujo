@@ -35,9 +35,9 @@ the day is clear. It dims on a day you have not written anything on.
 
 ![The bar pill showing two of four done](docs/bar-pill.png)
 
-**The day view** is the list: click a box to strike it through, type in the
-field to add. `‹` and `›` walk through dates; the completion rail and `2/5 ·
-40%` say how the day is going.
+**The day view** is the list: click a box to strike it through, click a long
+task's text to read it whole, type in the field to add. `‹` and `›` walk
+through dates; the completion rail and `2/5 · 40%` say how the day is going.
 
 ![The day view](docs/day.png)
 
@@ -84,6 +84,7 @@ The panel is keyboard-first. Open it and:
 |---|---|
 | `j` `k` / `↓` `↑` | move down and up the list |
 | `space` / `enter` | tick the task off |
+| `o` | open a long task to read it whole (or click its text) |
 | `e` | rename it in place |
 | `x` | delete it |
 | `J` `K` | reorder |
@@ -257,7 +258,7 @@ What each field does when the two machines disagree:
 | | |
 |---|---|
 | A task only one machine has | kept |
-| Finished on either | finished, keeping the earlier completion time |
+| Ticked or unticked on both | the later one wins, by `toggledAt` |
 | Deleted on either | deleted — this outranks finished |
 | Edited on both | the later edit wins, by `updatedAt` |
 | Migrated on both, to any days | one task, not two |
